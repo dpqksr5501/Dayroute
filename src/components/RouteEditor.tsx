@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowDown, ArrowUp, Check, Clock3, Coffee, Copy, ExternalLink, Footprints, GripVertical, MapPin,
   Plus, Play, Share2, Trash2, Utensils, Trees, Palette, ShoppingBag, ChevronDown, CalendarDays, Car, TrainFront, Navigation, Pencil } from 'lucide-react';
-import { directDistance, formatDuration, hasCoordinates, schedule, totalMinutes, type Category, type Route, type Stop, type TravelMode } from '../domain';
+import { formatDuration, hasCoordinates, schedule, totalMinutes, type Category, type Route, type Stop, type TravelMode } from '../domain';
 import PlacePicker from './PlacePicker';
 import RouteCover from './RouteCover';
 import CoverPhotoControl from './CoverPhotoControl';
@@ -60,7 +60,7 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
         <div className="itinerary-content">
           {preview ? <h1 className="route-heading">{route.title}</h1> : <input className="route-title-input" aria-label="코스 제목" value={route.title} maxLength={100} onChange={e => patch({ title: e.target.value })} />}
           {preview && route.description && <p className="route-description">{route.description}</p>}
-          <div className="route-meta"><span><CalendarDays size={15} />{route.date ? route.date.replaceAll('-', '.') : '날짜 미정'}</span><span><MapPin size={15} />{route.stops.length}곳</span><span><Clock3 size={15} />{formatDuration(totalMinutes(route))}</span></div>
+          <div className="route-meta"><span><CalendarDays size={15} />{route.date ? route.date.replaceAll('-', '.') : '날짜 미정'}</span><span><MapPin size={15} />{route.stops.length}곳</span><span title="머무는 시간과 직접 설정한 이동 시간을 합친 일정이에요"><Clock3 size={15} />일정 {formatDuration(totalMinutes(route))}</span></div>
           {!preview && <><button className="details-toggle" aria-expanded={details} onClick={() => setDetails(!details)}><CalendarDays size={15} /> 코스 설정 <ChevronDown size={15} className={details ? 'rotate' : ''} /></button>
             {details && <div className="route-settings form-grid"><label>날짜<input type="date" value={route.date} onChange={e => patch({ date: e.target.value })} /></label><label>시작 시간<input type="time" value={route.startTime} onChange={e => patch({ startTime: e.target.value || '12:00' })} /></label>
               <label>지역<input value={route.region} maxLength={100} placeholder="서울 · 성수" onChange={e => patch({ region: e.target.value })} /></label><label>색상<select value={route.theme} onChange={e => patch({ theme: e.target.value as Route['theme'] })}><option value="forest">세이지</option><option value="town">샌드</option><option value="river">블루</option></select></label><label className="span-2">소개<textarea rows={2} aria-label="코스 소개" value={route.description} maxLength={1000} onChange={e => patch({ description: e.target.value })} /></label></div>}</>}
@@ -86,7 +86,6 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
                     <label>머무는 시간 (분)<input type="number" min={0} max={1440} value={stop.duration} onChange={e => patchStop(stop.id, { duration: Math.max(0, Math.min(1440, Number(e.target.value))) })} /></label>
                     <label className="span-2">주소<input value={stop.address} maxLength={300} placeholder="주소를 입력해 두면 찾기 편해요" onChange={e => patchStop(stop.id, { address: e.target.value })} /></label>
                     <label className="span-2">우리의 메모<textarea rows={2} value={stop.note} maxLength={2000} placeholder="먹고 싶은 메뉴, 예약 시간, 이곳을 고른 이유…" onChange={e => patchStop(stop.id, { note: e.target.value })} /></label>
-                    <label>예상 비용 (원)<input type="number" min={0} max={100000000} value={stop.cost} onChange={e => patchStop(stop.id, { cost: Math.max(0, Math.min(100000000, Number(e.target.value))) })} /></label>
                     <label className="checkbox-label"><input type="checkbox" checked={stop.reserved} onChange={e => patchStop(stop.id, { reserved: e.target.checked })} /> 예약 완료</label>
                   </div>
                   <button className={`location-button ${picking === stop.id ? 'active' : ''}`} onClick={() => { setPicking(picking === stop.id ? null : stop.id); setMobileMap(true); }}><MapPin size={16} />{picking === stop.id ? '지도에서 위치를 눌러주세요' : hasCoordinates(stop) ? '지도에서 위치 다시 지정' : '지도에서 위치 지정'}<Navigation size={14} /></button>
@@ -107,7 +106,6 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
         </Suspense>
         <div className="map-tour-control"><div><h3>{current?.name || '코스 미리보기'}</h3>{current?.note && <p>{current.note}</p>}</div>
           <button className="primary" disabled={!route.stops.some(hasCoordinates)} onClick={() => setTour(!tour)}><Play size={16} fill="currentColor" />{tour ? '멈추기' : '둘러보기'}</button></div>
-        <div className="map-stats"><span title="장소 사이 직선거리 합계예요"><MapPin size={15} />직선 {directDistance(route.stops).toFixed(1)}km</span><span><Clock3 size={15} />{formatDuration(totalMinutes(route))}</span>{route.stops.some(s => s.cost > 0) && <span>{route.stops.reduce((a, s) => a + s.cost, 0).toLocaleString()}원</span>}</div>
       </aside>
     </div>
     <button className="mobile-map-switch" onClick={() => setMobileMap(!mobileMap)}><MapPin size={17} />{mobileMap ? '일정 보기' : '지도 보기'}</button>

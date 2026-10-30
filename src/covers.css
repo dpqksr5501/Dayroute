@@ -35,3 +35,5 @@
 .map-preview-credit a:focus-visible{outline-offset:1px}
 .editor-cover>.map-preview-credit{left:0;right:0;bottom:0;border:0;border-radius:0;backdrop-filter:none;color:#6a766b;background:#fffffff0;padding:3px 6px;font:7px/1.4 sans-serif}
 .editor-cover>.cover-photo-error{left:14px;right:14px;bottom:10px;color:#96784d;background:#fff8edef;border:1px solid #ead8bb;border-radius:7px;padding:8px 11px;backdrop-filter:none;font-size:10px}
+
+@media(max-width:760px){.map-tour-control{padding-bottom:calc(88px + env(safe-area-inset-bottom,0px))}}
