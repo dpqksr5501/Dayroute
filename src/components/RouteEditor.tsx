@@ -1,0 +1,116 @@
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { ArrowLeft, ArrowDown, ArrowUp, Check, Clock3, Coffee, Copy, ExternalLink, Footprints, GripVertical, MapPin,
+  Plus, Play, Share2, Trash2, Utensils, Trees, Palette, ShoppingBag, ChevronDown, CalendarDays, Car, TrainFront, Navigation, Pencil } from 'lucide-react';
+import { directDistance, formatDuration, hasCoordinates, schedule, totalMinutes, type Category, type Route, type Stop, type TravelMode } from '../domain';
+import PlacePicker from './PlacePicker';
+import RouteCover from './RouteCover';
+import CoverPhotoControl from './CoverPhotoControl';
+import MapPreviewCredit from './MapPreviewCredit';
+
+const MapView = lazy(() => import('./MapView'));
+const categoryIcons = { '식사': Utensils, '카페': Coffee, '산책': Trees, '문화': Palette, '쇼핑': ShoppingBag, '기타': MapPin };
+const modes = { walk: Footprints, car: Car, transit: TrainFront };
+const categoryIcon = (category: Category, size = 19) => { const Icon = categoryIcons[category]; return <Icon size={size} />; };
+export default function RouteEditor({ route, onChange, onBack, onShare, onDuplicate, onDelete, readonly = false, onSaveCopy }: {
+  route: Route; onChange: (r: Route) => boolean; onBack: () => void; onShare: () => void;
+  onDuplicate: () => void; onDelete: () => void; readonly?: boolean; onSaveCopy?: () => void;
+}) {
+  const latestRoute = useRef(route); latestRoute.current = route;
+  const [adding, setAdding] = useState(false), [selected, setSelected] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null), [picking, setPicking] = useState<string | null>(null);
+  const [preview, setPreview] = useState(readonly), [mobileMap, setMobileMap] = useState(() => route.stops.length > 0 && window.matchMedia('(max-width: 760px)').matches);
+  const [tour, setTour] = useState(false), [details, setDetails] = useState(false);
+  const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 760px)').matches);
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 760px)');
+    const update = () => setNarrow(media.matches); media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+  const times = schedule(route);
+  const patch = (p: Partial<Route>) => onChange({ ...route, ...p, updatedAt: new Date().toISOString() });
+  const patchStop = (id: string, p: Partial<Stop>) => patch({ stops: route.stops.map(s => s.id === id ? { ...s, ...p } : s) });
+  const move = (from: number, to: number) => {
+    if (from === to || to < 0 || to >= route.stops.length) return;
+    const stops = [...route.stops]; stops.splice(to, 0, stops.splice(from, 1)[0]); patch({ stops });
+  };
+  useEffect(() => {
+    if (!tour || !route.stops.length) return;
+    const located = route.stops.filter(hasCoordinates);
+    if (!located.length) { setTour(false); return; }
+    let i = 0; setSelected(located[0].id);
+    const id = window.setInterval(() => {
+      i++;
+      if (i >= located.length) { setTour(false); clearInterval(id); }
+      else setSelected(located[i].id);
+    }, 3800);
+    return () => clearInterval(id);
+  }, [tour]);
+  const current = route.stops.find(s => s.id === selected);
+  return <>
+    <div className="editor-toolbar"><button className="text-button" onClick={onBack}><ArrowLeft size={17} /> 코스 보관함</button>
+      <div className="toolbar-actions">{readonly ? <span className="badge">공유받은 코스 · 보기 전용</span> : <>
+        <button className="icon-button desktop-only" aria-label="코스 복제" onClick={onDuplicate}><Copy size={18} /></button>
+        <button className="icon-button" aria-label="코스 삭제" title="코스 삭제" onClick={onDelete}><Trash2 size={17} /></button>
+        <button className="secondary small" onClick={() => { setPreview(!preview); setPicking(null); }}>{preview ? <Pencil size={16} /> : <Play size={16} />}{preview ? '편집하기' : '미리보기'}</button>
+      </>}<button className="primary small" onClick={readonly ? onSaveCopy : onShare}>{readonly ? <Plus size={16} /> : <Share2 size={16} />}{readonly ? '내 보관함에 저장' : '공유하기'}</button></div>
+    </div>
+    <div className="editor-layout">
+      <section className={`itinerary-pane ${mobileMap ? 'mobile-hidden' : ''}`} aria-label="코스 일정">
+        <div className="editor-cover"><RouteCover route={route} />{!route.coverPhoto && route.stops.some(hasCoordinates) && <MapPreviewCredit />}{!preview && !readonly && <CoverPhotoControl hasPhoto={!!route.coverPhoto} onChange={photo => onChange({ ...latestRoute.current, coverPhoto: photo, updatedAt: new Date().toISOString() })} />}</div>
+        <div className="itinerary-content">
+          {preview ? <h1 className="route-heading">{route.title}</h1> : <input className="route-title-input" aria-label="코스 제목" value={route.title} maxLength={100} onChange={e => patch({ title: e.target.value })} />}
+          {preview && route.description && <p className="route-description">{route.description}</p>}
+          <div className="route-meta"><span><CalendarDays size={15} />{route.date ? route.date.replaceAll('-', '.') : '날짜 미정'}</span><span><MapPin size={15} />{route.stops.length}곳</span><span><Clock3 size={15} />{formatDuration(totalMinutes(route))}</span></div>
+          {!preview && <><button className="details-toggle" aria-expanded={details} onClick={() => setDetails(!details)}><CalendarDays size={15} /> 코스 설정 <ChevronDown size={15} className={details ? 'rotate' : ''} /></button>
+            {details && <div className="route-settings form-grid"><label>날짜<input type="date" value={route.date} onChange={e => patch({ date: e.target.value })} /></label><label>시작 시간<input type="time" value={route.startTime} onChange={e => patch({ startTime: e.target.value || '12:00' })} /></label>
+              <label>지역<input value={route.region} maxLength={100} placeholder="서울 · 성수" onChange={e => patch({ region: e.target.value })} /></label><label>색상<select value={route.theme} onChange={e => patch({ theme: e.target.value as Route['theme'] })}><option value="forest">세이지</option><option value="town">샌드</option><option value="river">블루</option></select></label><label className="span-2">소개<textarea rows={2} aria-label="코스 소개" value={route.description} maxLength={1000} onChange={e => patch({ description: e.target.value })} /></label></div>}</>}
+          <div className="timeline-title"><h2>장소 <span>{route.stops.length}</span></h2></div>
+          {!route.stops.length && <div className="empty-stops"><MapPin size={30} /></div>}
+          <div className="timeline">{route.stops.map((stop, i) => {
+            const ModeIcon = modes[stop.mode];
+            return <div className="stop-wrapper" key={stop.id} onDragOver={e => { if (!preview) e.preventDefault(); }} onDrop={e => { e.preventDefault(); if (!preview) { const raw = e.dataTransfer.getData('text/dayroute-index'); const from = Number(raw); if (raw && Number.isInteger(from) && from >= 0 && from < route.stops.length) move(from, i); } }}>
+              <span className="timeline-number">{i + 1}</span>
+              <article className={`stop-card ${selected === stop.id ? 'selected' : ''}`}>
+                <div className="stop-card-head">
+                  {!preview && <span className="drag-handle" draggable onDragStart={e => { e.dataTransfer.setData('text/dayroute-index', String(i)); e.dataTransfer.effectAllowed = 'move'; }} title="드래그하여 순서 변경"><GripVertical size={17} /></span>}
+                  <button className="stop-summary" onClick={() => { setSelected(stop.id); if (!preview) setExpanded(expanded === stop.id ? null : stop.id); }} aria-expanded={preview ? undefined : expanded === stop.id}>
+                    <span className={`category-icon cat-${stop.category}`}>{categoryIcon(stop.category)}</span><span><small>{times[i]} <span>· {stop.category}</span></small><strong>{stop.name || '이름 없는 장소'}</strong></span>
+                  </button>
+                  {!preview && <button className="icon-button" aria-label={`${stop.name || '장소'} 편집`} onClick={() => { setExpanded(expanded === stop.id ? null : stop.id); setSelected(stop.id); }}><ChevronDown size={17} className={expanded === stop.id ? 'rotate' : ''} /></button>}
+                </div>
+                {preview && <div className="preview-stop">{(stop.note || stop.address) && <p>{stop.note || stop.address}</p>}<div><span><Clock3 size={13} /> {stop.duration}분</span>{stop.reserved && <span className="reservation"><Check size={13} /> 예약 완료</span>}
+                  <a href={`https://map.naver.com/p/search/${encodeURIComponent(stop.address ? `${stop.name} ${stop.address}` : stop.name)}`} target="_blank" rel="noreferrer">지도에서 확인 <ExternalLink size={12} /></a></div></div>}
+                {!preview && expanded === stop.id && <div className="stop-form">
+                  <div className="form-grid"><label className="span-2">장소 이름<input value={stop.name} maxLength={100} placeholder="가고 싶은 장소" onChange={e => patchStop(stop.id, { name: e.target.value })} /></label>
+                    <label>종류<select value={stop.category} onChange={e => patchStop(stop.id, { category: e.target.value as Category })}>{Object.keys(categoryIcons).map(c => <option key={c}>{c}</option>)}</select></label>
+                    <label>머무는 시간 (분)<input type="number" min={0} max={1440} value={stop.duration} onChange={e => patchStop(stop.id, { duration: Math.max(0, Math.min(1440, Number(e.target.value))) })} /></label>
+                    <label className="span-2">주소<input value={stop.address} maxLength={300} placeholder="주소를 입력해 두면 찾기 편해요" onChange={e => patchStop(stop.id, { address: e.target.value })} /></label>
+                    <label className="span-2">우리의 메모<textarea rows={2} value={stop.note} maxLength={2000} placeholder="먹고 싶은 메뉴, 예약 시간, 이곳을 고른 이유…" onChange={e => patchStop(stop.id, { note: e.target.value })} /></label>
+                    <label>예상 비용 (원)<input type="number" min={0} max={100000000} value={stop.cost} onChange={e => patchStop(stop.id, { cost: Math.max(0, Math.min(100000000, Number(e.target.value))) })} /></label>
+                    <label className="checkbox-label"><input type="checkbox" checked={stop.reserved} onChange={e => patchStop(stop.id, { reserved: e.target.checked })} /> 예약 완료</label>
+                  </div>
+                  <button className={`location-button ${picking === stop.id ? 'active' : ''}`} onClick={() => { setPicking(picking === stop.id ? null : stop.id); setMobileMap(true); }}><MapPin size={16} />{picking === stop.id ? '지도에서 위치를 눌러주세요' : hasCoordinates(stop) ? '지도에서 위치 다시 지정' : '지도에서 위치 지정'}<Navigation size={14} /></button>
+                  {hasCoordinates(stop) && <small className="coordinate-label">{stop.lat.toFixed(5)}, {stop.lng.toFixed(5)}</small>}
+                  <div className="stop-controls"><div><button className="icon-button" aria-label={`${stop.name} 위로 이동`} disabled={i === 0} onClick={() => move(i, i - 1)}><ArrowUp size={16} /></button><button className="icon-button" aria-label={`${stop.name} 아래로 이동`} disabled={i === route.stops.length - 1} onClick={() => move(i, i + 1)}><ArrowDown size={16} /></button></div>
+                    <button className="text-button danger" onClick={() => { patch({ stops: route.stops.filter(s => s.id !== stop.id) }); if (picking === stop.id) setPicking(null); }}><Trash2 size={14} /> 삭제</button></div>
+                </div>}
+              </article>
+              {i < route.stops.length - 1 && <div className="travel-leg" title="직접 설정한 이동 시간이에요"><ModeIcon size={14} />{preview ? <span>{stop.travelMinutes}분</span> : <><select aria-label={`${stop.name}에서 이동수단`} value={stop.mode} onChange={e => patchStop(stop.id, { mode: e.target.value as TravelMode })}><option value="walk">도보</option><option value="car">자동차</option><option value="transit">대중교통</option></select><input aria-label={`${stop.name}에서 이동 시간`} type="number" min={0} max={1440} value={stop.travelMinutes} onChange={e => patchStop(stop.id, { travelMinutes: Math.max(0, Math.min(1440, Number(e.target.value))) })} /><span>분</span></>}</div>}
+            </div>;
+          })}</div>
+          {!preview && <button className="add-stop" disabled={route.stops.length >= 100} onClick={() => setAdding(true)}><Plus size={19} /> {route.stops.length >= 100 ? '최대 100곳' : '장소 추가'}</button>}
+        </div>
+      </section>
+      <aside className={`map-pane ${mobileMap ? 'mobile-visible' : ''}`}>
+        <Suspense fallback={<div className="map-placeholder"><span className="spinner" /> 지도를 준비하고 있어요</div>}>
+          {(!narrow || mobileMap) && <MapView stops={route.stops} selectedId={selected} onSelect={id => { setTour(false); setSelected(id); }} onInteract={() => setTour(false)} onOverview={() => { setSelected(null); setTour(false); }} picking={!!picking} tour={preview} onPick={(lng, lat) => { if (picking && !readonly) patchStop(picking, { lng, lat }); setPicking(null); setMobileMap(false); }} />}
+        </Suspense>
+        <div className="map-tour-control"><div><h3>{current?.name || '코스 미리보기'}</h3>{current?.note && <p>{current.note}</p>}</div>
+          <button className="primary" disabled={!route.stops.some(hasCoordinates)} onClick={() => setTour(!tour)}><Play size={16} fill="currentColor" />{tour ? '멈추기' : '둘러보기'}</button></div>
+        <div className="map-stats"><span title="장소 사이 직선거리 합계예요"><MapPin size={15} />직선 {directDistance(route.stops).toFixed(1)}km</span><span><Clock3 size={15} />{formatDuration(totalMinutes(route))}</span>{route.stops.some(s => s.cost > 0) && <span>{route.stops.reduce((a, s) => a + s.cost, 0).toLocaleString()}원</span>}</div>
+      </aside>
+    </div>
+    <button className="mobile-map-switch" onClick={() => setMobileMap(!mobileMap)}><MapPin size={17} />{mobileMap ? '일정 보기' : '지도 보기'}</button>
+    {adding && <PlacePicker onClose={() => setAdding(false)} onAdd={stop => { patch({ stops: [...route.stops, stop] }); setAdding(false); setExpanded(stop.id); setSelected(stop.id); }} />}
+  </>;
+}
