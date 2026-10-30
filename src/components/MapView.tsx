@@ -14,6 +14,7 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
   const latest = useRef({ stops, picking, onPick, onSelect, onInteract, onOverview }); latest.current = { stops, picking, onPick, onSelect, onInteract, onOverview };
   const overview = useRef(true), framed = useRef(false), flatFocus = useRef(false);
   const [ready, setReady] = useState(false), [error, setError] = useState('');
+  const [bearing, setBearing] = useState(0);
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const fit = () => {
     const bounds = mapPreviewPlan(stops).bounds;
@@ -38,6 +39,7 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
       });
       map.current = instance;
       instance.touchZoomRotate.enableRotation();
+      instance.on('rotate', () => setBearing(instance.getBearing()));
       instance.on('pitchend', e => { const in3D = instance.getPitch() > 1; if ('originalEvent' in e && e.originalEvent) flatFocus.current = !in3D; });
       instance.on('movestart', e => { if ('originalEvent' in e && e.originalEvent) { overview.current = false; latest.current.onInteract?.(); } });
       instance.on('touchstart', () => latest.current.onInteract?.());
@@ -106,6 +108,9 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
   return <div className={`map-shell ${tour ? 'tour-map' : ''}`}>
     <div ref={container} className="map-canvas" aria-label="코스 지도" />
     <div className="map-actions"><button className="map-action" onClick={() => { latest.current.onInteract?.(); latest.current.onOverview?.(); fit(); }} aria-label="전체 코스 보기"><RotateCcw size={16} /> 전체</button>
+      <button className="map-action map-compass" aria-label="북쪽 방향으로 되돌리기" title="북쪽으로 · 기울기 초기화" onClick={() => { latest.current.onInteract?.(); map.current?.easeTo({ bearing: 0, pitch: 0, duration: reduced ? 0 : 700 }); }}>
+        <svg width="20" height="24" viewBox="0 0 20 24" aria-hidden="true"><text x="10" y="6" textAnchor="middle" fontSize="7" fill="currentColor">N</text><g transform={`rotate(${-bearing} 10 15)`}><path d="M10 8 14 16 10 14Z" fill="#a65f51" /><path d="M10 8 6 16 10 14Z" fill="#ce8c7e" /><path d="M10 22 6 14 10 16Z" fill="#9aa697" /><path d="M10 22 14 14 10 16Z" fill="#71836d" /></g></svg>
+      </button>
     </div>
     {picking && <div className="map-pick-message"><Crosshair size={17} /> 지도를 눌러 장소의 위치를 지정하세요</div>}
     {error && <div className="map-error" role="status">{error}</div>}

@@ -37,3 +37,5 @@
 .editor-cover>.cover-photo-error{left:14px;right:14px;bottom:10px;color:#96784d;background:#fff8edef;border:1px solid #ead8bb;border-radius:7px;padding:8px 11px;backdrop-filter:none;font-size:10px}
 
 @media(max-width:760px){.map-tour-control{padding-bottom:calc(88px + env(safe-area-inset-bottom,0px))}}
+
+.map-compass{justify-content:center;min-width:36px;padding:4px 8px}.map-compass svg{flex-shrink:0}
