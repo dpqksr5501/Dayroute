@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { GeoJSONSource } from 'maplibre-gl';
 import maplibregl from '../mapRuntime';
-import { Crosshair, Info, Layers3, Map as MapIcon, RotateCcw } from 'lucide-react';
+import { Crosshair, RotateCcw } from 'lucide-react';
 import { hasCoordinates, type Stop } from '../domain';
 import { mapPreviewPlan } from '../mapPreviewPlan';
 
@@ -14,8 +14,6 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
   const latest = useRef({ stops, picking, onPick, onSelect, onInteract, onOverview }); latest.current = { stops, picking, onPick, onSelect, onInteract, onOverview };
   const overview = useRef(true), framed = useRef(false), flatFocus = useRef(false);
   const [ready, setReady] = useState(false), [error, setError] = useState('');
-  const [tilted, setTilted] = useState(false);
-  const [showInfo, setShowInfo] = useState(false);
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const fit = () => {
     const bounds = mapPreviewPlan(stops).bounds;
@@ -40,8 +38,7 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
       });
       map.current = instance;
       instance.touchZoomRotate.enableRotation();
-      instance.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'bottom-right');
-      instance.on('pitchend', e => { const in3D = instance.getPitch() > 1; setTilted(in3D); if ('originalEvent' in e && e.originalEvent) flatFocus.current = !in3D; });
+      instance.on('pitchend', e => { const in3D = instance.getPitch() > 1; if ('originalEvent' in e && e.originalEvent) flatFocus.current = !in3D; });
       instance.on('movestart', e => { if ('originalEvent' in e && e.originalEvent) { overview.current = false; latest.current.onInteract?.(); } });
       instance.on('touchstart', () => latest.current.onInteract?.());
       instance.on('mousedown', () => latest.current.onInteract?.());
@@ -109,11 +106,9 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
   return <div className={`map-shell ${tour ? 'tour-map' : ''}`}>
     <div ref={container} className="map-canvas" aria-label="코스 지도" />
     <div className="map-actions"><button className="map-action" onClick={() => { latest.current.onInteract?.(); latest.current.onOverview?.(); fit(); }} aria-label="전체 코스 보기"><RotateCcw size={16} /> 전체</button>
-      <button className="map-action" aria-pressed={tilted} onClick={() => { latest.current.onInteract?.(); overview.current = false; flatFocus.current = tilted; map.current?.easeTo({ pitch: !tilted ? 52 : 0, bearing: map.current.getBearing(), duration: reduced ? 0 : 700 }); }}>
-        {tilted ? <Layers3 size={16} /> : <MapIcon size={16} />}{tilted ? '3D' : '2D'}</button><button className="map-action" aria-label="지도 안내" aria-expanded={showInfo} onClick={() => setShowInfo(!showInfo)}><Info size={16} /></button></div>
+    </div>
     {picking && <div className="map-pick-message"><Crosshair size={17} /> 지도를 눌러 장소의 위치를 지정하세요</div>}
     {error && <div className="map-error" role="status">{error}</div>}
     {!ready && !error && <div className="map-loading"><span className="spinner" /> 지도를 펼치고 있어요</div>}
-    {showInfo && <div className="map-caption">한 손가락: 이동 · 두 손가락: 확대·축소·회전<br />두 손가락을 함께 위아래로: 기울기<br />점선은 방문 순서예요. 건물은 지도 기반 3D예요.</div>}
   </div>;
 }
