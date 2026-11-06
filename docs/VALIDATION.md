@@ -42,10 +42,10 @@
 
 ## Transit routing and live arrival stitching (2026-11-07)
 
-- Added `TransitStep` and `TransitLeg` domain models with strict validation (`validTransit`, `validTransitStep`), schedule integration (`transitFor`, `legMinutes`), and share/backup round-tripping.
-- Added `/api/transport` actions for multi-provider transit routing (`action=transit` supporting TMAP Transit and ODSay) and first-leg boarding station live arrival matching (`action=transit-live` supporting Seoul TOPIS, Gyeonggi GBIS, and Seoul real-time subway arrivals).
-- Added route number normalization (`normalizeRouteName`) and station matching so transit itinerary steps automatically highlight the catchable bus/subway arrival at the boarding stop.
-- Updated `TravelLeg` UI and `MapView` path layers to distinguish planned dashed connections, walking road lines, and transit route lines, while providing Naver Map and Kakao Map origin-to-destination deep links.
-- Verified with 19 passing unit tests (`tests/*.test.ts`), strict TypeScript check (`tsc -b`), and Vite production bundle build.
+- Added `TransitStep` and `TransitLeg` domain models with strict validation (`validTransit`, `validTransitStep`), schedule integration (`transitFor`, `carFor`, `legMinutes`), and share/backup round-tripping.
+- Added `/api/transport` actions for multi-provider transit routing (`action=transit` supporting TMAP Transit and ODSay), road driving (`action=car`), live POI search (`action=pois`), reverse geocoding (`action=reverse-geocode`), and first-leg boarding station live arrival matching (`action=transit-live` supporting Seoul TOPIS, Gyeonggi GBIS + Gyeonggi OpenAPI `BusStation` fallback, and Seoul real-time subway arrivals).
+- Fixed Seoul TOPIS server-to-server endpoint protocol (`http://ws.bus.go.kr`) and added dual-source Gyeonggi station resolution (`apis.data.go.kr` with `openapi.gg.go.kr/BusStation` fallback), verified live against Seoul (Seongsu) and Gyeonggi (Suwon Hwaseong Haenggung) coordinates.
+- Enhanced 3D map quality in `MapView.tsx` with directional lighting (`setLight`), height-interpolated vertical-gradient building extrusions, cased road/transit polylines, transit boarding node markers, and an explicit 2D/3D camera toggle.
+- Verified with 20 passing unit tests (`tests/*.test.ts`), strict TypeScript check (`tsc -b`), and Vite production bundle build.
 
 No paid API keys, account sign-ups, system-wide tool installations, unrelated process termination, or engine builds were performed.

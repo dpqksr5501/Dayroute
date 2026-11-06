@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { GeoJSONSource } from 'maplibre-gl';
 import maplibregl from '../mapRuntime';
-import { Crosshair, RotateCcw } from 'lucide-react';
+import { Box, Crosshair, RotateCcw } from 'lucide-react';
 import { carFor, hasCoordinates, transitFor, walkingFor, type Stop } from '../domain';
 import { mapPreviewPlan } from '../mapPreviewPlan';
 
@@ -14,7 +14,7 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
   const latest = useRef({ stops, picking, onPick, onSelect, onInteract, onOverview }); latest.current = { stops, picking, onPick, onSelect, onInteract, onOverview };
   const overview = useRef(true), framed = useRef(false), flatFocus = useRef(false);
   const [ready, setReady] = useState(false), [error, setError] = useState('');
-  const [bearing, setBearing] = useState(0);
+  const [bearing, setBearing] = useState(0), [in3D, setIn3D] = useState(false);
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const fit = () => {
     const bounds = mapPreviewPlan(stops).bounds;
@@ -24,6 +24,19 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
     const padding = { top: Math.max(85, gap), right: Math.max(85, gap), bottom: Math.max(65, gap), left: gap };
     map.current.fitBounds(bounds, { padding, maxZoom: 15.3, duration: reduced || !framed.current ? 0 : 900, pitch: 0, bearing: 0 });
     framed.current = true;
+  };
+  const toggle3D = () => {
+    const instance = map.current;
+    if (!instance) return;
+    latest.current.onInteract?.();
+    const next3D = instance.getPitch() <= 15;
+    flatFocus.current = !next3D;
+    instance.easeTo({
+      pitch: next3D ? 54 : 0,
+      bearing: next3D && Math.abs(instance.getBearing()) < 2 ? -12 : instance.getBearing(),
+      zoom: next3D && instance.getZoom() < 14.6 ? 15.2 : instance.getZoom(),
+      duration: reduced ? 0 : 750,
+    });
   };
   useEffect(() => {
     if (!container.current) return;
@@ -40,29 +53,39 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
       map.current = instance;
       instance.touchZoomRotate.enableRotation();
       instance.on('rotate', () => setBearing(instance.getBearing()));
-      instance.on('pitchend', e => { const in3D = instance.getPitch() > 1; if ('originalEvent' in e && e.originalEvent) flatFocus.current = !in3D; });
+      instance.on('pitch', () => setIn3D(instance.getPitch() > 15));
+      instance.on('pitchend', e => { const tilted = instance.getPitch() > 15; setIn3D(tilted); if ('originalEvent' in e && e.originalEvent) flatFocus.current = !tilted; });
       instance.on('movestart', e => { if ('originalEvent' in e && e.originalEvent) { overview.current = false; latest.current.onInteract?.(); } });
       instance.on('touchstart', () => latest.current.onInteract?.());
       instance.on('mousedown', () => latest.current.onInteract?.());
       instance.on('wheel', () => latest.current.onInteract?.());
       instance.on('load', () => {
+        try { instance.setLight({ anchor: 'viewport', color: '#fffdf8', intensity: 0.38, position: [1.3, 210, 38] }); } catch {}
         const label = instance.getStyle().layers.find(l => l.type === 'symbol')?.id;
         const sources = instance.getStyle().sources;
         const vectorSource = Object.entries(sources).find(([, s]) => s.type === 'vector')?.[0];
         if (vectorSource) instance.addLayer({ id: 'dayroute-buildings', source: vectorSource, 'source-layer': 'building',
-          type: 'fill-extrusion', minzoom: 14, filter: ['!=', ['get', 'hide_3d'], true], paint: {
-            'fill-extrusion-color': '#c9d3c3', 'fill-extrusion-opacity': 0.8,
+          type: 'fill-extrusion', minzoom: 13.5, filter: ['!=', ['get', 'hide_3d'], true], paint: {
+            'fill-extrusion-color': ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], 6], 0, '#d3ddd0', 24, '#c2cfc0', 60, '#b0c1b2', 120, '#9cb1a1'],
+            'fill-extrusion-opacity': 0.86,
+            'fill-extrusion-vertical-gradient': true,
             'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 6],
             'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
           } }, label);
         instance.addSource('dayroute-path', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
         instance.addLayer({ id: 'dayroute-path-line', type: 'line', source: 'dayroute-path', paint: {
           'line-color': '#52725a', 'line-width': 3, 'line-dasharray': [2, 2], 'line-opacity': 0.85,
-        }, filter: ['all', ['!=', ['get', 'road'], true], ['!=', ['get', 'transit'], true]] });
+        }, filter: ['all', ['==', ['geometry-type'], 'LineString'], ['!=', ['get', 'road'], true], ['!=', ['get', 'transit'], true]] });
+        instance.addLayer({ id: 'dayroute-road-casing', type: 'line', source: 'dayroute-path', filter: ['==', ['get', 'road'], true],
+          layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ffffff', 'line-width': 8, 'line-opacity': 0.85 } });
         instance.addLayer({ id: 'dayroute-road-line', type: 'line', source: 'dayroute-path', filter: ['==', ['get', 'road'], true],
-          layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#315e4c', 'line-width': 5, 'line-opacity': .9 } });
+          layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#315e4c', 'line-width': 5, 'line-opacity': 0.94 } });
+        instance.addLayer({ id: 'dayroute-transit-casing', type: 'line', source: 'dayroute-path', filter: ['==', ['get', 'transit'], true],
+          layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ffffff', 'line-width': 8, 'line-opacity': 0.85 } });
         instance.addLayer({ id: 'dayroute-transit-line', type: 'line', source: 'dayroute-path', filter: ['==', ['get', 'transit'], true],
-          layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#2b5b84', 'line-width': 5, 'line-opacity': .9 } });
+          layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#2b5b84', 'line-width': 5, 'line-opacity': 0.94 } });
+        instance.addLayer({ id: 'dayroute-transit-nodes', type: 'circle', source: 'dayroute-path', filter: ['==', ['get', 'transitNode'], true],
+          paint: { 'circle-radius': 4.5, 'circle-color': '#ffffff', 'circle-stroke-color': '#2b5b84', 'circle-stroke-width': 2.2 } });
         setReady(true); setError('');
       });
       instance.on('click', e => { if (latest.current.picking) latest.current.onPick?.(e.lngLat.lng, e.lngLat.lat); });
@@ -98,7 +121,11 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
       const walk = walkingFor(s, next) ?? carFor(s, next), transit = transitFor(s, next);
       const road = !!walk?.coordinates.length, transitRoad = !!transit?.coordinates.length;
       const coordinates = road ? walk!.coordinates : transitRoad ? transit!.coordinates : [[s.lng, s.lat], [next.lng, next.lat]];
-      return [{ type: 'Feature' as const, properties: { road, transit: transitRoad }, geometry: { type: 'LineString' as const, coordinates } }];
+      const lineFeature = { type: 'Feature' as const, properties: { road, transit: transitRoad }, geometry: { type: 'LineString' as const, coordinates } };
+      const nodeFeatures = (transit?.steps || [])
+        .filter(step => step.mode !== 'walk' && typeof step.fromLng === 'number' && typeof step.fromLat === 'number')
+        .map(step => ({ type: 'Feature' as const, properties: { transitNode: true }, geometry: { type: 'Point' as const, coordinates: [step.fromLng!, step.fromLat!] } }));
+      return [lineFeature, ...nodeFeatures];
     });
     (instance.getSource('dayroute-path') as GeoJSONSource)?.setData({ type: 'FeatureCollection', features });
   }, [ready, stops, selectedId]);
@@ -117,11 +144,12 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
   return <div className={`map-shell ${tour ? 'tour-map' : ''}`}>
     <div ref={container} className="map-canvas" aria-label="코스 지도" />
     <div className="map-actions"><button className="map-action" onClick={() => { latest.current.onInteract?.(); latest.current.onOverview?.(); fit(); }} aria-label="전체 코스 보기"><RotateCcw size={16} /> 전체</button>
+      <button className={`map-action ${in3D ? 'active-mode' : ''}`} onClick={toggle3D} aria-pressed={in3D} aria-label="3D 입체 지도 전환"><Box size={15} /> {in3D ? '3D' : '2D'}</button>
       <button className="map-action map-compass" aria-label="북쪽 방향으로 되돌리기" title="북쪽으로 · 기울기 초기화" onClick={() => { latest.current.onInteract?.(); map.current?.easeTo({ bearing: 0, pitch: 0, duration: reduced ? 0 : 700 }); }}>
         <svg width="20" height="24" viewBox="0 0 20 24" aria-hidden="true"><text x="10" y="6" textAnchor="middle" fontSize="7" fill="currentColor">N</text><g transform={`rotate(${-bearing} 10 15)`}><path d="M10 8 14 16 10 14Z" fill="#a65f51" /><path d="M10 8 6 16 10 14Z" fill="#ce8c7e" /><path d="M10 22 6 14 10 16Z" fill="#9aa697" /><path d="M10 22 14 14 10 16Z" fill="#71836d" /></g></svg>
       </button>
     </div>
-    {stops.length > 1 && <div className="map-route-key">점선 · 장소 연결{hasWalkRoad ? ' / 초록 실선 · 도보' : ''}{hasTransitRoad ? ' / 파란 실선 · 대중교통' : ''}</div>}
+    {stops.length > 1 && <div className="map-route-key">점선 · 장소 연결{hasWalkRoad ? ' / 초록 실선 · 도로' : ''}{hasTransitRoad ? ' / 파란 실선 · 대중교통' : ''}</div>}
     {picking && <div className="map-pick-message"><Crosshair size={17} /> 지도를 눌러 장소의 위치를 지정하세요</div>}
     {error && <div className="map-error" role="status">{error}</div>}
     {!ready && !error && <div className="map-loading"><span className="spinner" /> 지도를 펼치고 있어요</div>}

@@ -37,7 +37,13 @@ function point(params: URLSearchParams, prefix = ''): [number, number] {
 }
 async function json(url: string, init: RequestInit, fetcher: typeof fetch) {
   const response = await fetcher(url, { ...init, signal: AbortSignal.timeout(8000), redirect: 'error' });
-  if (!response.ok) throw new TransportError(response.status === 429 ? 'quota' : 'upstream', response.status === 429 ? '조회 한도에 도달했어요. 잠시 후 다시 확인하세요.' : '제공처에서 응답을 받지 못했어요.');
+  if (!response.ok) {
+    if (response.status === 429) throw new TransportError('quota', '조회 한도에 도달했어요. 잠시 후 다시 확인하세요.');
+    if (response.status === 401 || response.status === 403) {
+      throw new TransportError('unconfigured', 'API 키가 아직 제공처에 동기화 중이거나(발급 후 최대 1시간 소요) 앱 상품 연결이 필요해요.');
+    }
+    throw new TransportError('upstream', '제공처에서 응답을 받지 못했어요.');
+  }
   const value: unknown = await response.json();
   return record(value);
 }
@@ -277,6 +283,75 @@ export function matchRouteArrivals(arrivals: BusArrival[], targetRoute: string):
 function cleanStationName(raw: string): string {
   return raw.replace(/역$/, '').replace(/\(.*\)/g, '').trim();
 }
+const GYEONGGI_CITIES: [string, number, number][] = [
+  ['수원시', 127.015, 37.282], ['성남시', 127.126, 37.400], ['고양시', 126.775, 37.658], ['용인시', 127.177, 37.241],
+  ['부천시', 126.766, 37.503], ['안양시', 126.956, 37.394], ['안산시', 126.831, 37.321], ['남양주시', 127.216, 37.636],
+  ['화성시', 126.831, 37.199], ['평택시', 127.112, 36.992], ['의정부시', 127.033, 37.738], ['시흥시', 126.803, 37.380],
+  ['파주시', 126.780, 37.759], ['광명시', 126.866, 37.478], ['김포시', 126.715, 37.615], ['군포시', 126.935, 37.361],
+  ['광주시', 127.255, 37.429], ['이천시', 127.435, 37.272], ['양주시', 127.045, 37.785], ['오산시', 127.077, 37.149],
+  ['구리시', 127.129, 37.594], ['안성시', 127.279, 37.008], ['포천시', 127.200, 37.894], ['의왕시', 126.968, 37.344],
+  ['하남시', 127.214, 37.539], ['여주시', 127.637, 37.298], ['양평군', 127.380, 37.491], ['동두천시', 127.060, 37.903],
+  ['과천시', 126.987, 37.429], ['가평군', 127.509, 37.831], ['연천군', 127.074, 38.096],
+];
+async function fetchGyeonggiOpenApiStations(lng: number, lat: number, key: string, fetcher: typeof fetch): Promise<BusStation[]> {
+  const nearest = [...GYEONGGI_CITIES].sort((a, b) => Math.hypot(a[1] - lng, a[2] - lat) - Math.hypot(b[1] - lng, b[2] - lat)).slice(0, 2);
+  const rad = Math.PI / 180;
+  const found = new Map<string, BusStation>();
+  for (const [sigun] of nearest) {
+    for (const page of [1, 2]) {
+      const q = new URLSearchParams({ KEY: key, Type: 'json', pIndex: String(page), pSize: '1000', SIGUN_NM: sigun });
+      const body = await json(`https://openapi.gg.go.kr/BusStation?${q}`, {}, fetcher);
+      const busStation = list(body.BusStation).map(record);
+      const total = Number(record(list(busStation[0]?.head)[0]).list_total_count || 0);
+      const rows = list(busStation[1]?.row ?? busStation[0]?.row).map(record);
+      for (const r of rows) {
+        const sx = Number(r.WGS84_LOGT), sy = Number(r.WGS84_LAT), id = str(r.STATION_ID), name = str(r.STATION_NM_INFO);
+        if (!/^\d{9}$/.test(id) || !name || !Number.isFinite(sx) || !Number.isFinite(sy)) continue;
+        const dLat = (sy - lat) * rad, dLng = (sx - lng) * rad;
+        const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat * rad) * Math.cos(sy * rad) * Math.sin(dLng / 2) ** 2;
+        const dist = Math.round(6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a))));
+        if (dist <= 600) found.set(id, { id, name, region: 'gyeonggi', number: str(r.STATION_MANAGE_NO), distance: dist });
+      }
+      if (total <= 1000) break;
+    }
+    if (found.size > 0) break;
+  }
+  return [...found.values()].sort((a, b) => (a.distance ?? 999) - (b.distance ?? 999)).slice(0, 20);
+}
+async function resolveStations(region: 'seoul' | 'gyeonggi', lng: number, lat: number, env: Env, fetcher: typeof fetch): Promise<BusStation[]> {
+  if (region === 'seoul' && (lng < 126.7 || lng > 127.25 || lat < 37.4 || lat > 37.72)) {
+    throw new TransportError('unsupported', '서울 인근 장소를 선택하거나 경기로 바꿔 주세요.');
+  }
+  const primaryKey = region === 'seoul' ? env.SEOUL_BUS_SERVICE_KEY : env.GYEONGGI_BUS_SERVICE_KEY;
+  if (primaryKey) {
+    try {
+      const query = new URLSearchParams();
+      query.set(region === 'seoul' ? 'ServiceKey' : 'serviceKey', primaryKey);
+      query.set(region === 'seoul' ? 'resultType' : 'format', 'json');
+      query.set(region === 'seoul' ? 'tmX' : 'x', String(lng));
+      query.set(region === 'seoul' ? 'tmY' : 'y', String(lat));
+      query.set('radius', '500');
+      const endpoint = region === 'seoul'
+        ? 'http://ws.bus.go.kr/api/rest/stationinfo/getStationByPos'
+        : 'https://apis.data.go.kr/6410000/busstationservice/v2/getBusStationAroundListv2';
+      consume(region);
+      const body = await json(`${endpoint}?${query}`, {}, fetcher);
+      const items = publicItems(body, region).map(record).map((s): BusStation => ({
+        id: str(region === 'seoul' ? s.arsId : s.stationId), name: str(region === 'seoul' ? s.stationNm : s.stationName), region,
+        number: str(region === 'seoul' ? s.arsId : s.mobileNo), distance: Number(region === 'seoul' ? s.dist : s.distance),
+      })).filter(s => s.id && s.name).slice(0, 20);
+      if (items.length > 0 || region === 'seoul' || !env.GYEONGGI_BUS_STATION_KEY) return items;
+    } catch (e) {
+      if (region !== 'gyeonggi' || !env.GYEONGGI_BUS_STATION_KEY) throw e;
+    }
+  }
+  if (region === 'gyeonggi' && env.GYEONGGI_BUS_STATION_KEY) {
+    consume(region);
+    return fetchGyeonggiOpenApiStations(lng, lat, env.GYEONGGI_BUS_STATION_KEY, fetcher);
+  }
+  required(env, region === 'seoul' ? 'SEOUL_BUS_SERVICE_KEY' : 'GYEONGGI_BUS_SERVICE_KEY');
+  return [];
+}
 export async function transportData(params: URLSearchParams, env: Env = process.env, fetcher: typeof fetch = fetch): Promise<unknown> {
   const action = params.get('action');
   const tmapEnabled = !!env.TMAP_APP_KEY && env.TMAP_FREE_PLAN_CONFIRMED === 'true';
@@ -370,9 +445,6 @@ export async function transportData(params: URLSearchParams, env: Env = process.
         return { stationName: `${cleanName}역`, route: targetRoute, matched, others: others.slice(0, 8), fetchedAt: new Date().toISOString(), source: '서울 실시간 지하철' } satisfies TransitLiveResult;
       }
       const region = params.get('region') === 'gyeonggi' ? 'gyeonggi' : 'seoul';
-      const stationApiKey = region === 'seoul'
-        ? required(env, 'SEOUL_BUS_SERVICE_KEY')
-        : (env.GYEONGGI_BUS_SERVICE_KEY || required(env, 'GYEONGGI_BUS_STATION_KEY'));
       const arrivalApiKey = required(env, region === 'seoul' ? 'SEOUL_BUS_SERVICE_KEY' : 'GYEONGGI_BUS_SERVICE_KEY');
       let stationId = str(params.get('station'));
       let resolvedName = stationName || '승차 정류소';
@@ -380,19 +452,8 @@ export async function transportData(params: URLSearchParams, env: Env = process.
       const validDirectId = region === 'seoul' ? /^\d{5}$/.test(stationId) : /^\d{9}$/.test(stationId);
       if (!validDirectId) {
         const [lng, lat] = point(params);
-        const stQuery = new URLSearchParams();
-        stQuery.set(region === 'seoul' ? 'ServiceKey' : 'serviceKey', stationApiKey);
-        stQuery.set(region === 'seoul' ? 'resultType' : 'format', 'json');
-        stQuery.set(region === 'seoul' ? 'tmX' : 'x', String(lng));
-        stQuery.set(region === 'seoul' ? 'tmY' : 'y', String(lat));
-        stQuery.set('radius', '500');
-        const stEndpoint = region === 'seoul' ? 'https://ws.bus.go.kr/api/rest/stationinfo/getStationByPos' : 'https://apis.data.go.kr/6410000/busstationservice/v2/getBusStationAroundListv2';
-        consume(region);
-        const stBody = await json(`${stEndpoint}?${stQuery}`, {}, fetcher);
-        const stations = publicItems(stBody, region).map(record).map((s): BusStation => ({
-          id: str(region === 'seoul' ? s.arsId : s.stationId), name: str(region === 'seoul' ? s.stationNm : s.stationName), region,
-          number: str(region === 'seoul' ? s.arsId : s.mobileNo), distance: Number(region === 'seoul' ? s.dist : s.distance),
-        })).filter(s => (region === 'seoul' ? /^\d{5}$/ : /^\d{9}$/).test(s.id) && s.name);
+        const stations = (await resolveStations(region, lng, lat, env, fetcher))
+          .filter(s => (region === 'seoul' ? /^\d{5}$/ : /^\d{9}$/).test(s.id));
         if (!stations.length) throw new TransportError('upstream', '승차 지점 주변 500m 안에 조회 가능한 정류소가 없어요.');
         const cleanTarget = stationName.replace(/\s+/g, '');
         const best = (cleanTarget ? stations.find(s => s.name.replace(/\s+/g, '').includes(cleanTarget) || cleanTarget.includes(s.name.replace(/\s+/g, ''))) : undefined) || stations[0];
@@ -402,7 +463,7 @@ export async function transportData(params: URLSearchParams, env: Env = process.
       arrQuery.set(region === 'seoul' ? 'ServiceKey' : 'serviceKey', arrivalApiKey);
       arrQuery.set(region === 'seoul' ? 'resultType' : 'format', 'json');
       arrQuery.set(region === 'seoul' ? 'arsId' : 'stationId', stationId);
-      const arrEndpoint = region === 'seoul' ? 'https://ws.bus.go.kr/api/rest/stationinfo/getStationByUid' : 'https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2';
+      const arrEndpoint = region === 'seoul' ? 'http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid' : 'https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2';
       consume(region);
       const arrBody = await json(`${arrEndpoint}?${arrQuery}`, {}, fetcher);
       const arrivals = parseArrivals(arrBody, region);
@@ -415,30 +476,20 @@ export async function transportData(params: URLSearchParams, env: Env = process.
     }
     const region = params.get('region');
     if (region !== 'seoul' && region !== 'gyeonggi') throw new TransportError('unsupported', '서울·경기 버스를 지원해요. 지역을 선택하세요.');
-    const apiKey = action === 'stations' && region === 'gyeonggi'
-      ? (env.GYEONGGI_BUS_SERVICE_KEY || required(env, 'GYEONGGI_BUS_STATION_KEY'))
-      : required(env, region === 'seoul' ? 'SEOUL_BUS_SERVICE_KEY' : 'GYEONGGI_BUS_SERVICE_KEY');
+    if (action === 'stations') {
+      const [lng, lat] = point(params);
+      return resolveStations(region, lng, lat, env, fetcher);
+    }
+    const apiKey = required(env, region === 'seoul' ? 'SEOUL_BUS_SERVICE_KEY' : 'GYEONGGI_BUS_SERVICE_KEY');
     const query = new URLSearchParams();
     query.set(region === 'seoul' ? 'ServiceKey' : 'serviceKey', apiKey);
     query.set(region === 'seoul' ? 'resultType' : 'format', 'json');
-    let endpoint: string;
-    if (action === 'stations') {
-      const [lng, lat] = point(params);
-      if (region === 'seoul' && (lng < 126.7 || lng > 127.25 || lat < 37.4 || lat > 37.72)) throw new TransportError('unsupported', '서울 인근 장소를 선택하거나 경기로 바꿔 주세요.');
-      query.set(region === 'seoul' ? 'tmX' : 'x', String(lng)); query.set(region === 'seoul' ? 'tmY' : 'y', String(lat)); query.set('radius', '500');
-      endpoint = region === 'seoul' ? 'https://ws.bus.go.kr/api/rest/stationinfo/getStationByPos' : 'https://apis.data.go.kr/6410000/busstationservice/v2/getBusStationAroundListv2';
-    } else {
-      const id = params.get('station') || '';
-      if (!(region === 'seoul' ? /^\d{5}$/ : /^\d{9}$/).test(id)) throw new TransportError('invalid', region === 'seoul' ? '정류소 번호 5자리를 확인하세요.' : '경기 정류소 ID 9자리를 확인하세요. 표지판 번호와 달라요.');
-      query.set(region === 'seoul' ? 'arsId' : 'stationId', id);
-      endpoint = region === 'seoul' ? 'https://ws.bus.go.kr/api/rest/stationinfo/getStationByUid' : 'https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2';
-    }
+    const id = params.get('station') || '';
+    if (!(region === 'seoul' ? /^\d{5}$/ : /^\d{9}$/).test(id)) throw new TransportError('invalid', region === 'seoul' ? '정류소 번호 5자리를 확인하세요.' : '경기 정류소 ID 9자리를 확인하세요. 표지판 번호와 달라요.');
+    query.set(region === 'seoul' ? 'arsId' : 'stationId', id);
+    const endpoint = region === 'seoul' ? 'http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid' : 'https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2';
     consume(region);
     const body = await json(`${endpoint}?${query}`, {}, fetcher);
-    if (action === 'stations') return publicItems(body, region).map(record).map((s): BusStation => ({
-      id: str(region === 'seoul' ? s.arsId : s.stationId), name: str(region === 'seoul' ? s.stationNm : s.stationName), region,
-      number: str(region === 'seoul' ? s.arsId : s.mobileNo), distance: Number(region === 'seoul' ? s.dist : s.distance),
-    })).filter(s => s.id && s.name).slice(0, 20);
     return { arrivals: parseArrivals(body, region), fetchedAt: new Date().toISOString(), source: region === 'seoul' ? '서울 TOPIS' : '경기 GBIS' };
   };
   const ttl = action === 'walk' || action === 'car' || action === 'reverse-geocode' ? 3600000
