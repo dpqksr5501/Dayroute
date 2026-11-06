@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { GeoJSONSource } from 'maplibre-gl';
 import maplibregl from '../mapRuntime';
 import { Crosshair, RotateCcw } from 'lucide-react';
-import { hasCoordinates, type Stop } from '../domain';
+import { hasCoordinates, transitFor, walkingFor, type Stop } from '../domain';
 import { mapPreviewPlan } from '../mapPreviewPlan';
 
 interface Props { stops: Stop[]; selectedId: string | null; onSelect: (id: string) => void;
@@ -58,7 +58,11 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
         instance.addSource('dayroute-path', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
         instance.addLayer({ id: 'dayroute-path-line', type: 'line', source: 'dayroute-path', paint: {
           'line-color': '#52725a', 'line-width': 3, 'line-dasharray': [2, 2], 'line-opacity': 0.85,
-        } });
+        }, filter: ['all', ['!=', ['get', 'road'], true], ['!=', ['get', 'transit'], true]] });
+        instance.addLayer({ id: 'dayroute-road-line', type: 'line', source: 'dayroute-path', filter: ['==', ['get', 'road'], true],
+          layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#315e4c', 'line-width': 5, 'line-opacity': .9 } });
+        instance.addLayer({ id: 'dayroute-transit-line', type: 'line', source: 'dayroute-path', filter: ['==', ['get', 'transit'], true],
+          layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#2b5b84', 'line-width': 5, 'line-opacity': .9 } });
         setReady(true); setError('');
       });
       instance.on('click', e => { if (latest.current.picking) latest.current.onPick?.(e.lngLat.lng, e.lngLat.lat); });
@@ -91,7 +95,10 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
     const features = stops.flatMap((s, i) => {
       const next = stops[i + 1];
       if (!next || !hasCoordinates(s) || !hasCoordinates(next)) return [];
-      return [{ type: 'Feature' as const, properties: {}, geometry: { type: 'LineString' as const, coordinates: [[s.lng, s.lat], [next.lng, next.lat]] } }];
+      const walk = walkingFor(s, next), transit = transitFor(s, next);
+      const road = !!walk?.coordinates.length, transitRoad = !!transit?.coordinates.length;
+      const coordinates = road ? walk!.coordinates : transitRoad ? transit!.coordinates : [[s.lng, s.lat], [next.lng, next.lat]];
+      return [{ type: 'Feature' as const, properties: { road, transit: transitRoad }, geometry: { type: 'LineString' as const, coordinates } }];
     });
     (instance.getSource('dayroute-path') as GeoJSONSource)?.setData({ type: 'FeatureCollection', features });
   }, [ready, stops, selectedId]);
@@ -105,6 +112,8 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
     }
   }, [ready, selectedId]);
   useEffect(() => { if (map.current) map.current.getCanvas().style.cursor = picking ? 'crosshair' : ''; }, [ready, picking]);
+  const hasWalkRoad = stops.some((s, i) => walkingFor(s, stops[i + 1])?.coordinates.length);
+  const hasTransitRoad = stops.some((s, i) => transitFor(s, stops[i + 1])?.coordinates.length);
   return <div className={`map-shell ${tour ? 'tour-map' : ''}`}>
     <div ref={container} className="map-canvas" aria-label="코스 지도" />
     <div className="map-actions"><button className="map-action" onClick={() => { latest.current.onInteract?.(); latest.current.onOverview?.(); fit(); }} aria-label="전체 코스 보기"><RotateCcw size={16} /> 전체</button>
@@ -112,6 +121,7 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
         <svg width="20" height="24" viewBox="0 0 20 24" aria-hidden="true"><text x="10" y="6" textAnchor="middle" fontSize="7" fill="currentColor">N</text><g transform={`rotate(${-bearing} 10 15)`}><path d="M10 8 14 16 10 14Z" fill="#a65f51" /><path d="M10 8 6 16 10 14Z" fill="#ce8c7e" /><path d="M10 22 6 14 10 16Z" fill="#9aa697" /><path d="M10 22 14 14 10 16Z" fill="#71836d" /></g></svg>
       </button>
     </div>
+    {stops.length > 1 && <div className="map-route-key">점선 · 장소 연결{hasWalkRoad ? ' / 초록 실선 · 도보' : ''}{hasTransitRoad ? ' / 파란 실선 · 대중교통' : ''}</div>}
     {picking && <div className="map-pick-message"><Crosshair size={17} /> 지도를 눌러 장소의 위치를 지정하세요</div>}
     {error && <div className="map-error" role="status">{error}</div>}
     {!ready && !error && <div className="map-loading"><span className="spinner" /> 지도를 펼치고 있어요</div>}

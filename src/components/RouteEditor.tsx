@@ -1,15 +1,16 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowDown, ArrowUp, Check, Clock3, Coffee, Copy, ExternalLink, Footprints, GripVertical, MapPin,
-  Plus, Play, Share2, Trash2, Utensils, Trees, Palette, ShoppingBag, ChevronDown, CalendarDays, Car, TrainFront, Navigation, Pencil } from 'lucide-react';
-import { formatDuration, hasCoordinates, schedule, totalMinutes, type Category, type Route, type Stop, type TravelMode } from '../domain';
+import { ArrowLeft, ArrowDown, ArrowUp, Check, Clock3, Coffee, Copy, ExternalLink, GripVertical, MapPin,
+  Plus, Play, Share2, Trash2, Utensils, Trees, Palette, ShoppingBag, ChevronDown, CalendarDays, BusFront, Navigation, Pencil } from 'lucide-react';
+import { formatDuration, hasCoordinates, schedule, totalMinutes, type Category, type Route, type Stop } from '../domain';
 import PlacePicker from './PlacePicker';
 import RouteCover from './RouteCover';
 import CoverPhotoControl from './CoverPhotoControl';
 import MapPreviewCredit from './MapPreviewCredit';
+import TravelLeg from './TravelLeg';
+import BusPanel from './BusPanel';
 
 const MapView = lazy(() => import('./MapView'));
 const categoryIcons = { '식사': Utensils, '카페': Coffee, '산책': Trees, '문화': Palette, '쇼핑': ShoppingBag, '기타': MapPin };
-const modes = { walk: Footprints, car: Car, transit: TrainFront };
 const categoryIcon = (category: Category, size = 19) => { const Icon = categoryIcons[category]; return <Icon size={size} />; };
 export default function RouteEditor({ route, onChange, onBack, onShare, onDuplicate, onDelete, readonly = false, onSaveCopy }: {
   route: Route; onChange: (r: Route) => boolean; onBack: () => void; onShare: () => void;
@@ -20,15 +21,16 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
   const [expanded, setExpanded] = useState<string | null>(null), [picking, setPicking] = useState<string | null>(null);
   const [preview, setPreview] = useState(readonly), [mobileMap, setMobileMap] = useState(() => route.stops.length > 0 && window.matchMedia('(max-width: 760px)').matches);
   const [tour, setTour] = useState(false), [details, setDetails] = useState(false);
+  const [busStop, setBusStop] = useState<string | null>(null);
   const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 760px)').matches);
   useEffect(() => {
     const media = window.matchMedia('(max-width: 760px)');
     const update = () => setNarrow(media.matches); media.addEventListener('change', update);
     return () => media.removeEventListener('change', update);
   }, []);
-  const times = schedule(route);
-  const patch = (p: Partial<Route>) => onChange({ ...route, ...p, updatedAt: new Date().toISOString() });
-  const patchStop = (id: string, p: Partial<Stop>) => patch({ stops: route.stops.map(s => s.id === id ? { ...s, ...p } : s) });
+  const times = schedule(route), departures = schedule(route, true);
+  const patch = (p: Partial<Route>) => onChange({ ...latestRoute.current, ...p, updatedAt: new Date().toISOString() });
+  const patchStop = (id: string, p: Partial<Stop>) => patch({ stops: latestRoute.current.stops.map(s => s.id === id ? { ...s, ...p } : s) });
   const move = (from: number, to: number) => {
     if (from === to || to < 0 || to >= route.stops.length) return;
     const stops = [...route.stops]; stops.splice(to, 0, stops.splice(from, 1)[0]); patch({ stops });
@@ -44,7 +46,7 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
       else setSelected(located[i].id);
     }, 3800);
     return () => clearInterval(id);
-  }, [tour]);
+  }, [tour, route.stops]);
   const current = route.stops.find(s => s.id === selected);
   return <>
     <div className="editor-toolbar"><button className="text-button" onClick={onBack}><ArrowLeft size={17} /> 코스 보관함</button>
@@ -60,14 +62,14 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
         <div className="itinerary-content">
           {preview ? <h1 className="route-heading">{route.title}</h1> : <input className="route-title-input" aria-label="코스 제목" value={route.title} maxLength={100} onChange={e => patch({ title: e.target.value })} />}
           {preview && route.description && <p className="route-description">{route.description}</p>}
-          <div className="route-meta"><span><CalendarDays size={15} />{route.date ? route.date.replaceAll('-', '.') : '날짜 미정'}</span><span><MapPin size={15} />{route.stops.length}곳</span><span title="머무는 시간과 직접 설정한 이동 시간을 합친 일정이에요"><Clock3 size={15} />일정 {formatDuration(totalMinutes(route))}</span></div>
+          <div className="route-meta"><span><CalendarDays size={15} />{route.date ? route.date.replaceAll('-', '.') : '날짜 미정'}</span><span><MapPin size={15} />{route.stops.length}곳</span><span title="체류 시간과 구간별 예상 이동 시간을 합친 계획이에요"><Clock3 size={15} />일정 {formatDuration(totalMinutes(route))}</span></div>
+          <button className="bus-entry" onClick={() => setBusStop(selected || route.stops[0]?.id || '')}><BusFront size={18} /><span>버스 도착</span><span>현재 기준</span></button>
           {!preview && <><button className="details-toggle" aria-expanded={details} onClick={() => setDetails(!details)}><CalendarDays size={15} /> 코스 설정 <ChevronDown size={15} className={details ? 'rotate' : ''} /></button>
             {details && <div className="route-settings form-grid"><label>날짜<input type="date" value={route.date} onChange={e => patch({ date: e.target.value })} /></label><label>시작 시간<input type="time" value={route.startTime} onChange={e => patch({ startTime: e.target.value || '12:00' })} /></label>
               <label>지역<input value={route.region} maxLength={100} placeholder="서울 · 성수" onChange={e => patch({ region: e.target.value })} /></label><label>색상<select value={route.theme} onChange={e => patch({ theme: e.target.value as Route['theme'] })}><option value="forest">세이지</option><option value="town">샌드</option><option value="river">블루</option></select></label><label className="span-2">소개<textarea rows={2} aria-label="코스 소개" value={route.description} maxLength={1000} onChange={e => patch({ description: e.target.value })} /></label></div>}</>}
           <div className="timeline-title"><h2>장소 <span>{route.stops.length}</span></h2></div>
           {!route.stops.length && <div className="empty-stops"><MapPin size={30} /></div>}
           <div className="timeline">{route.stops.map((stop, i) => {
-            const ModeIcon = modes[stop.mode];
             return <div className="stop-wrapper" key={stop.id} onDragOver={e => { if (!preview) e.preventDefault(); }} onDrop={e => { e.preventDefault(); if (!preview) { const raw = e.dataTransfer.getData('text/dayroute-index'); const from = Number(raw); if (raw && Number.isInteger(from) && from >= 0 && from < route.stops.length) move(from, i); } }}>
               <span className="timeline-number">{i + 1}</span>
               <article className={`stop-card ${selected === stop.id ? 'selected' : ''}`}>
@@ -94,7 +96,7 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
                     <button className="text-button danger" onClick={() => { patch({ stops: route.stops.filter(s => s.id !== stop.id) }); if (picking === stop.id) setPicking(null); }}><Trash2 size={14} /> 삭제</button></div>
                 </div>}
               </article>
-              {i < route.stops.length - 1 && <div className="travel-leg" title="직접 설정한 이동 시간이에요"><ModeIcon size={14} />{preview ? <span>{stop.travelMinutes}분</span> : <><select aria-label={`${stop.name}에서 이동수단`} value={stop.mode} onChange={e => patchStop(stop.id, { mode: e.target.value as TravelMode })}><option value="walk">도보</option><option value="car">자동차</option><option value="transit">대중교통</option></select><input aria-label={`${stop.name}에서 이동 시간`} type="number" min={0} max={1440} value={stop.travelMinutes} onChange={e => patchStop(stop.id, { travelMinutes: Math.max(0, Math.min(1440, Number(e.target.value))) })} /><span>분</span></>}</div>}
+              {i < route.stops.length - 1 && <TravelLeg from={stop} to={route.stops[i + 1]} region={route.region} readonly={readonly || preview} departure={departures[i]} onPatch={p => patchStop(stop.id, p)} onBus={() => setBusStop(stop.id)} />}
             </div>;
           })}</div>
           {!preview && <button className="add-stop" disabled={route.stops.length >= 100} onClick={() => setAdding(true)}><Plus size={19} /> {route.stops.length >= 100 ? '최대 100곳' : '장소 추가'}</button>}
@@ -104,11 +106,12 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
         <Suspense fallback={<div className="map-placeholder"><span className="spinner" /> 지도를 준비하고 있어요</div>}>
           {(!narrow || mobileMap) && <MapView stops={route.stops} selectedId={selected} onSelect={id => { setTour(false); setSelected(id); }} onInteract={() => setTour(false)} onOverview={() => { setSelected(null); setTour(false); }} picking={!!picking} tour={preview} onPick={(lng, lat) => { if (picking && !readonly) patchStop(picking, { lng, lat }); setPicking(null); setMobileMap(false); }} />}
         </Suspense>
-        <div className="map-tour-control"><div><h3>{current?.name || '코스 미리보기'}</h3>{current?.note && <p>{current.note}</p>}</div>
-          <button className="primary" disabled={!route.stops.some(hasCoordinates)} onClick={() => setTour(!tour)}><Play size={16} fill="currentColor" />{tour ? '멈추기' : '둘러보기'}</button></div>
+        <div className="map-tour-control"><div><h3>{current?.name || route.title}</h3><p>{current ? `${times[route.stops.indexOf(current)]} 도착 · ${current.duration}분 머물기` : `${route.stops.length}곳 · ${route.startTime} 출발`}</p></div>
+          <div className="map-bottom-actions"><button className="secondary" aria-label="버스 도착 열기" onClick={() => setBusStop(selected || route.stops[0]?.id || '')}><BusFront size={18} /></button><button className="primary" disabled={!route.stops.some(hasCoordinates)} onClick={() => setTour(!tour)}><Play size={16} fill="currentColor" />{tour ? '멈추기' : '둘러보기'}</button></div></div>
       </aside>
     </div>
-    <button className="mobile-map-switch" onClick={() => setMobileMap(!mobileMap)}><MapPin size={17} />{mobileMap ? '일정 보기' : '지도 보기'}</button>
-    {adding && <PlacePicker onClose={() => setAdding(false)} onAdd={stop => { patch({ stops: [...route.stops, stop] }); setAdding(false); setExpanded(stop.id); setSelected(stop.id); }} />}
+    <div className="mobile-view-tabs" role="group" aria-label="코스 화면"><button aria-pressed={mobileMap} onClick={() => { setMobileMap(true); window.scrollTo(0, 0); }}><MapPin size={17} />지도</button><button aria-pressed={!mobileMap} onClick={() => setMobileMap(false)}><CalendarDays size={17} />일정</button></div>
+    {adding && <PlacePicker onClose={() => setAdding(false)} onAdd={stop => { if (patch({ stops: [...latestRoute.current.stops, stop] })) { setAdding(false); setExpanded(stop.id); setSelected(stop.id); } }} />}
+    {busStop !== null && <BusPanel stops={route.stops} initialStop={busStop} region={route.region} onClose={() => setBusStop(null)} />}
   </>;
 }

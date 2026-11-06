@@ -40,4 +40,12 @@
 - A failed map request uses the existing coordinate diagram with an explicit failure indicator. User-selected photos retain priority and are not sent to the thumbnail renderer.
 - Vercel project is configured for Vite static output, Node 24, pinned pnpm, and non-cached version metadata/service-worker updates. Browser data and photos are not part of the source deployment.
 
+## Transit routing and live arrival stitching (2026-11-07)
+
+- Added `TransitStep` and `TransitLeg` domain models with strict validation (`validTransit`, `validTransitStep`), schedule integration (`transitFor`, `legMinutes`), and share/backup round-tripping.
+- Added `/api/transport` actions for multi-provider transit routing (`action=transit` supporting TMAP Transit and ODSay) and first-leg boarding station live arrival matching (`action=transit-live` supporting Seoul TOPIS, Gyeonggi GBIS, and Seoul real-time subway arrivals).
+- Added route number normalization (`normalizeRouteName`) and station matching so transit itinerary steps automatically highlight the catchable bus/subway arrival at the boarding stop.
+- Updated `TravelLeg` UI and `MapView` path layers to distinguish planned dashed connections, walking road lines, and transit route lines, while providing Naver Map and Kakao Map origin-to-destination deep links.
+- Verified with 19 passing unit tests (`tests/*.test.ts`), strict TypeScript check (`tsc -b`), and Vite production bundle build.
+
 No paid API keys, account sign-ups, system-wide tool installations, unrelated process termination, or engine builds were performed.

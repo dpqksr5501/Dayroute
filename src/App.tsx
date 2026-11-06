@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowDownToLine, ArrowRight, ArrowUpFromLine, Check, CheckCheck, Clock3, Copy,
   Heart, LayoutGrid, Link2, MapPin, Plus, Route as RouteIcon, Search, Settings2, Sparkles, Undo2, WifiOff, X, CalendarDays, ExternalLink, FolderHeart } from 'lucide-react';
-import { cloneRoute, decodeShare, encodeShare, formatDuration, hasCoordinates, makeRoute, parseLibrary, routeText, totalMinutes, type Route } from './domain';
+import { cloneRoute, copyRoute, decodeShare, encodeShare, formatDuration, hasCoordinates, makeRoute, parseLibrary, routeText, totalMinutes, type Route } from './domain';
 import { downloadBackup, loadRoutes, persistRoutes, STORAGE_KEY } from './storage';
 import Modal from './components/Modal';
 import RouteEditor from './components/RouteEditor';
@@ -58,18 +58,28 @@ export default function App() {
   const commit = (next: Route[]) => {
     if (storageBlocked || storageConflict) { notify('저장 상태를 먼저 확인해 주세요. 설정에서 백업·복원할 수 있어요.'); return false; }
     if (next.length > 500) { notify('코스는 최대 500개까지 보관할 수 있어요. 먼저 백업하고 정리해 주세요.'); return false; }
-    const photoChanged = next.some(r => r.coverPhoto !== routes.find(previous => previous.id === r.id)?.coverPhoto);
-    if (photoChanged && !persistRoutes(next)) { notify('사진을 저장할 공간이 부족해요. 기존 코스와 사진은 그대로예요.'); return false; }
+    if (!persistRoutes(next)) { notify('저장하지 못했어요. 저장 공간과 코스 내용을 확인해 주세요.'); return false; }
     setHistory(h => [...h.slice(-39), routes]); setRoutes(next);
     return true;
   };
   const undo = () => {
     if (!history.length || storageBlocked || storageConflict) return;
-    const previous = history[history.length - 1]; setRoutes(previous); setHistory(h => h.slice(0, -1)); notify('이전 상태로 되돌렸어요.');
+    const previous = history[history.length - 1];
+    if (!persistRoutes(previous)) { notify('되돌린 내용을 저장하지 못했어요.'); return; }
+    setRoutes(previous); setHistory(h => h.slice(0, -1)); notify('이전 상태로 되돌렸어요.');
   };
-  const goHome = () => { setActiveId(null); setSharedRoute(null); historyReplace(); window.scrollTo(0, 0); };
-  const historyReplace = () => { if (location.hash) window.history.replaceState(null, '', location.pathname + location.search); };
-  const openRoute = (r: Route) => { setActiveId(r.id); setSharedRoute(null); historyReplace(); window.scrollTo(0, 0); };
+  useEffect(() => {
+    const readLocation = () => {
+      const match = /^#route=(.+)$/.exec(location.hash);
+      setActiveId(match ? decodeURIComponent(match[1]) : null);
+      const snapshot = readShared(); setSharedRoute(snapshot.route);
+      setModal(null); window.scrollTo(0, 0);
+    };
+    readLocation(); window.addEventListener('popstate', readLocation);
+    return () => window.removeEventListener('popstate', readLocation);
+  }, []);
+  const goHome = () => { setActiveId(null); setSharedRoute(null); window.history.pushState(null, '', location.pathname + location.search); window.scrollTo(0, 0); };
+  const openRoute = (r: Route) => { setActiveId(r.id); setSharedRoute(null); window.history.pushState(null, '', `#route=${encodeURIComponent(r.id)}`); window.scrollTo(0, 0); };
   const newRoute = () => { setNewTitle(''); setNewDate(''); setNewRegion('서울'); setModal('new'); };
   const duplicate = (r: Route) => { const copy = cloneRoute(r); if (commit([copy, ...routes])) { openRoute(copy); notify('코스를 복사했어요. 새로운 날짜로 다시 계획해 보세요.'); } };
   const filtered = routes.filter(r => (section !== 'favorites' || r.favorite) && (region === '전체' || (region === '경기' ? r.region.includes('경기') : r.region.includes('서울')))
@@ -100,8 +110,8 @@ export default function App() {
       }}>저장하고 업데이트</button></div>}
       <main id="main">{active ? <RouteEditor key={active.id} route={active} readonly={!!sharedRoute} onBack={goHome}
         onChange={r => commit(routes.map(x => x.id === r.id ? r : x))} onShare={() => setModal('share')} onDuplicate={() => duplicate(active)}
-        onDelete={() => { commit(routes.filter(r => r.id !== active.id)); goHome(); notify('코스를 삭제했어요. 상단 실행 취소로 복구할 수 있어요.'); }}
-        onSaveCopy={() => { const copy = cloneRoute(active); copy.title = active.title; if (commit([copy, ...routes])) { openRoute(copy); notify('내 보관함에 복사했어요.'); } }} /> : <div className="library-page">
+        onDelete={() => { if (commit(routes.filter(r => r.id !== active.id))) { goHome(); notify('코스를 삭제했어요. 실행 취소로 복구할 수 있어요.'); } }}
+        onSaveCopy={() => { const copy = copyRoute(active); if (commit([copy, ...routes])) { openRoute(copy); notify('내 보관함에 저장했어요.'); } }} /> : <div className="library-page">
         <div className="page-heading"><h1>{section === 'favorites' ? '즐겨찾기' : '코스 보관함'}<span className="heading-count">{filtered.length}</span></h1><button className="primary" onClick={newRoute} aria-label="새 코스 만들기"><Plus size={18} /> 새 코스</button></div>
         <section className="collection" aria-label="저장한 코스">
           <div className="collection-heading"><select className="sort-select" aria-label="코스 정렬" value={sort} onChange={e => setSort(e.target.value)}><option value="updated">최근 수정순</option><option value="title">이름순</option></select></div>
@@ -114,7 +124,7 @@ export default function App() {
         </section>
       </div>}</main>
     </div>
-    {modal === 'new' && <Modal title="새 코스" onClose={() => setModal(null)}><form onSubmit={e => { e.preventDefault(); const route = { ...makeRoute(), title: newTitle.trim() || '새로운 하루', region: newRegion, date: newDate }; commit([route, ...routes]); setModal(null); openRoute(route); }}>
+    {modal === 'new' && <Modal title="새 코스" onClose={() => setModal(null)}><form onSubmit={e => { e.preventDefault(); const route = { ...makeRoute(), title: newTitle.trim() || '새로운 하루', region: newRegion, date: newDate }; if (commit([route, ...routes])) { setModal(null); openRoute(route); } }}>
       <div className="form-grid"><label className="span-2">코스 이름<input autoFocus required maxLength={100} value={newTitle} placeholder="예: 느긋하게 보내는 토요일" onChange={e => setNewTitle(e.target.value)} /></label><label>지역<select value={newRegion} onChange={e => setNewRegion(e.target.value)}><option>서울</option><option>경기</option><option>기타</option></select></label><label>날짜 · 선택<input type="date" value={newDate} onChange={e => setNewDate(e.target.value)} /></label></div><div className="modal-footer"><button type="button" className="secondary" onClick={() => setModal(null)}>취소</button><button className="primary" type="submit">코스 만들기 <ArrowRight size={16} /></button></div></form></Modal>}
     {modal === 'settings' && <Modal title="설정과 데이터" onClose={() => setModal(null)}>
       <div className="settings-section"><h3>데이터</h3><p>이 브라우저에 저장돼요. 기기를 바꾸거나 데이터를 지우기 전에 백업하세요.</p><div className="button-row"><button className="secondary" onClick={() => downloadBackup(routes)}><ArrowDownToLine size={17} /> 전체 백업</button><button className="secondary" onClick={() => importInput.current?.click()}><ArrowUpFromLine size={17} /> 파일 가져오기</button></div>
@@ -124,16 +134,16 @@ export default function App() {
       <div className="settings-section"><h3>지도와 장소 정보</h3><p>무료 지도: MapLibre · OpenFreeMap · OpenStreetMap. 지도 화면을 열 때 표시 영역이 지도 제공자에게 요청돼요. 실사 3D·실시간 영업시간·도로 경로 자동 계산은 아직 연결하지 않았어요. 기본 장소 위치는 예시이므로 방문 전에 원문 지도를 확인해 주세요.</p><a href="https://openfreemap.org/" target="_blank" rel="noreferrer" className="inline-link">지도 제공 안내 <ExternalLink size={13} /></a></div>
       <div className="settings-section last"><h3>코스 커버</h3><p>기본은 장소 좌표로 그린 동선이에요. 직접 추가한 사진은 크기를 줄여 이 브라우저에만 저장하고, 코스 파일 백업에도 포함해요.</p></div>
     </Modal>}
-    {modal === 'share' && active && <Modal title="좋은 하루를 함께 나눠요" onClose={() => setModal(null)}><p className="modal-description">지금 코스의 사본을 공유해요. 이후 수정 사항은 이미 보낸 링크에 반영되지 않아요.</p>
+    {modal === 'share' && active && <Modal title="코스 공유" onClose={() => setModal(null)}><p className="modal-description">지금 코스의 사본을 공유해요. 이후 수정 사항은 이미 보낸 링크에 반영되지 않아요.</p>
       {isLocal && <div className="share-note"><Link2 size={19} /><span>지금은 내 컴퓨터에서 실행 중이에요.<br />다른 기기에 보내려면 코스 파일이나 일정 텍스트를 이용하세요. 웹 배포 후 링크 공유가 가능해요.</span></div>}
-      <div className="share-preview"><RouteCover route={active} decorative /><div><strong>{active.title}</strong><span>{active.region} · {active.stops.length}곳 · {formatDuration(totalMinutes(active))}</span></div></div>
+      <div className="share-preview"><RouteCover route={active} decorative /><div><strong>{active.title}</strong><span>{active.region} · {active.stops.length}곳 · 일정 {formatDuration(totalMinutes(active))}</span></div></div>
       <div className="share-buttons"><button className="secondary" onClick={() => void copyText(routeText(active), '일정을 복사했어요. 원하는 곳에 붙여넣어 주세요.')}><Copy size={17} /> 일정 텍스트 복사</button><button className="secondary" onClick={() => downloadBackup([active])}><ArrowDownToLine size={17} /> 이 코스 파일 저장</button>
         {!isLocal && <button className="primary" onClick={() => { const encoded = encodeShare(active); if (encoded.length > 12000) { notify('코스가 길어서 링크 대신 파일로 공유해 주세요.'); return; } void copyText(`${location.origin}/#share=${encoded}`, '보기 전용 링크를 복사했어요. 링크를 가진 사람이 코스를 볼 수 있어요.'); }}><Link2 size={17} /> 보기 전용 링크 복사</button>}</div><p className="fine-print">메모·일정·위치가 포함돼요. 사진은 파일로 공유할 때만 포함돼요.</p>
     </Modal>}
     <input ref={importInput} hidden type="file" accept=".json,application/json" aria-label="백업 파일 가져오기" onChange={async e => {
       const file = e.target.files?.[0]; e.target.value = ''; if (!file) return;
       try { if (file.size > 5_000_000) throw new Error('파일은 5MB 이하여야 해요.'); const backup = parseLibrary(await file.text());
-        const imported = backup.routes.map(r => ({ ...cloneRoute(r), title: r.title }));
+        const imported = backup.routes.map(copyRoute);
         const next = [...imported, ...routes]; if (next.length > 500) throw new Error('보관함에는 최대 500개 코스를 저장할 수 있어요.');
         if (storageBlocked || storageConflict) {
           const existing = localStorage.getItem(STORAGE_KEY);

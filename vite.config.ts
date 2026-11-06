@@ -1,15 +1,18 @@
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import { readFileSync } from 'node:fs';
+import { handleTransport } from './server/transport';
 
 const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
 const release = { version: pkg.version, build: process.env.DAYROUTE_BUILD_ID || new Date().toISOString() };
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [react(), {
     name: 'release-metadata',
     enforce: 'post',
     configureServer(server) {
+      const env = { ...process.env, ...loadEnv(mode, process.cwd(), '') };
       server.middlewares.use((req, res, next) => {
+        if (req.url?.split('?')[0] === '/api/transport') { void handleTransport(req, res, env); return; }
         if (req.url?.split('?')[0] !== '/version.json') return next();
         res.setHeader('Content-Type', 'application/json'); res.setHeader('Cache-Control', 'no-store');
         res.end(JSON.stringify(release));
@@ -40,4 +43,4 @@ self.addEventListener('fetch', event => {
   server: { host: '127.0.0.1', port: 5173, strictPort: true },
   preview: { host: '127.0.0.1', port: 4173, strictPort: true },
   build: { chunkSizeWarningLimit: 1200 },
-});
+}));

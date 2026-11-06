@@ -13,6 +13,7 @@ export function persistRoutes(routes: Route[]): boolean {
   try {
     const raw = JSON.stringify({ schemaVersion: 1, routes });
     if (new TextEncoder().encode(raw).length > 5_000_000) return false;
+    parseLibrary(raw);
     localStorage.setItem(STORAGE_KEY, raw); return true;
   }
   catch { return false; }
