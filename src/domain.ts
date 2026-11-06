@@ -8,6 +8,7 @@ export interface Stop {
   lng: number | null; lat: number | null; duration: number; travelMinutes: number;
   mode: TravelMode; cost: number; reserved: boolean;
   walking?: WalkingLeg;
+  car?: WalkingLeg;
   transit?: TransitLeg;
 }
 export interface WalkingLeg {
@@ -54,13 +55,17 @@ export function walkingFor(from: Stop, to: Stop | undefined): WalkingLeg | undef
   return to && from.mode === 'walk' && hasCoordinates(from) && hasCoordinates(to)
     && from.walking?.key === walkingKey(from, to) ? from.walking : undefined;
 }
+export function carFor(from: Stop, to: Stop | undefined): WalkingLeg | undefined {
+  return to && from.mode === 'car' && hasCoordinates(from) && hasCoordinates(to)
+    && from.car?.key === walkingKey(from, to) ? from.car : undefined;
+}
 export function transitFor(from: Stop, to: Stop | undefined): TransitLeg | undefined {
   return to && from.mode === 'transit' && hasCoordinates(from) && hasCoordinates(to)
     && from.transit?.key === walkingKey(from, to) ? from.transit : undefined;
 }
 export function legMinutes(route: Route, index: number): number {
   const from = route.stops[index], to = route.stops[index + 1];
-  return walkingFor(from, to)?.minutes ?? transitFor(from, to)?.minutes ?? from.travelMinutes;
+  return walkingFor(from, to)?.minutes ?? carFor(from, to)?.minutes ?? transitFor(from, to)?.minutes ?? from.travelMinutes;
 }
 export function totalMinutes(route: Route): number {
   return route.stops.reduce((total, s, i) => total + s.duration + (i < route.stops.length - 1 ? legMinutes(route, i) : 0), 0);
@@ -112,6 +117,7 @@ export function validStop(v: unknown): v is Stop {
     && ((v.lng === null && v.lat === null) || (num(v.lng, -180, 180) && num(v.lat, -85, 85)))
     && num(v.duration, 0, 1440) && num(v.travelMinutes, 0, 1440) && num(v.cost, 0, 100000000)
     && typeof v.reserved === 'boolean' && (v.walking === undefined || validWalking(v.walking))
+    && (v.car === undefined || validWalking(v.car))
     && (v.transit === undefined || validTransit(v.transit));
 }
 export function validWalking(v: unknown): v is WalkingLeg {
@@ -172,8 +178,8 @@ export function decodeShare(raw: string): Route {
 export function routeText(route: Route): string {
   const times = schedule(route);
   return `${route.title}\n${route.date || '날짜 미정'} · ${route.region}\n${route.description}\n\n` + route.stops.map((s, i) => {
-    const next = route.stops[i + 1], walk = walkingFor(s, next), transit = transitFor(s, next);
-    const legSource = walk ? 'TMAP 도보 예상' : transit ? `대중교통: ${transit.summary}` : '직접 설정';
+    const next = route.stops[i + 1], walk = walkingFor(s, next), car = carFor(s, next), transit = transitFor(s, next);
+    const legSource = walk ? 'TMAP 도보 예상' : car ? 'TMAP 자동차 예상' : transit ? `대중교통: ${transit.summary}` : '직접 설정';
     return `${times[i]} ${i + 1}. ${s.name}\n${s.address}${s.note ? `\n${s.note}` : ''}${i < route.stops.length - 1 ? `\n다음 장소까지 ${legMinutes(route, i)}분 (${legSource})` : ''}`;
   }).join('\n\n');
 }

@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowDown, ArrowUp, Check, Clock3, Coffee, Copy, ExternalLink, GripVertical, MapPin,
   Plus, Play, Share2, Trash2, Utensils, Trees, Palette, ShoppingBag, ChevronDown, CalendarDays, BusFront, Navigation, Pencil } from 'lucide-react';
 import { formatDuration, hasCoordinates, schedule, totalMinutes, type Category, type Route, type Stop } from '../domain';
+import { reverseGeocodeParams, transportRequest } from '../transport';
 import PlacePicker from './PlacePicker';
 import RouteCover from './RouteCover';
 import CoverPhotoControl from './CoverPhotoControl';
@@ -104,7 +105,17 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
       </section>
       <aside className={`map-pane ${mobileMap ? 'mobile-visible' : ''}`}>
         <Suspense fallback={<div className="map-placeholder"><span className="spinner" /> 지도를 준비하고 있어요</div>}>
-          {(!narrow || mobileMap) && <MapView stops={route.stops} selectedId={selected} onSelect={id => { setTour(false); setSelected(id); }} onInteract={() => setTour(false)} onOverview={() => { setSelected(null); setTour(false); }} picking={!!picking} tour={preview} onPick={(lng, lat) => { if (picking && !readonly) patchStop(picking, { lng, lat }); setPicking(null); setMobileMap(false); }} />}
+          {(!narrow || mobileMap) && <MapView stops={route.stops} selectedId={selected} onSelect={id => { setTour(false); setSelected(id); }} onInteract={() => setTour(false)} onOverview={() => { setSelected(null); setTour(false); }} picking={!!picking} tour={preview} onPick={(lng, lat) => {
+            if (picking && !readonly) {
+              const targetId = picking, currentStop = latestRoute.current.stops.find(s => s.id === targetId);
+              patchStop(targetId, { lng, lat });
+              if (currentStop && !currentStop.address.trim()) {
+                void transportRequest<{ address: string }>(reverseGeocodeParams(lng, lat), new AbortController().signal, 3600000)
+                  .then(r => { if (r.address) patchStop(targetId, { address: r.address }); }).catch(() => {});
+              }
+            }
+            setPicking(null); setMobileMap(false);
+          }} />}
         </Suspense>
         <div className="map-tour-control"><div><h3>{current?.name || route.title}</h3><p>{current ? `${times[route.stops.indexOf(current)]} 도착 · ${current.duration}분 머물기` : `${route.stops.length}곳 · ${route.startTime} 출발`}</p></div>
           <div className="map-bottom-actions"><button className="secondary" aria-label="버스 도착 열기" onClick={() => setBusStop(selected || route.stops[0]?.id || '')}><BusFront size={18} /></button><button className="primary" disabled={!route.stops.some(hasCoordinates)} onClick={() => setTour(!tour)}><Play size={16} fill="currentColor" />{tour ? '멈추기' : '둘러보기'}</button></div></div>

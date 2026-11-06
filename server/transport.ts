@@ -1,9 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   normalizeRouteName, TransportError,
-  type BusArrival, type BusStation, type TransitLiveResult, type TransitOption, type TransitRouteResult,
+  type BusArrival, type BusStation, type PoiItem, type TransitLiveResult, type TransitOption, type TransitRouteResult,
 } from '../src/transport.ts';
-import { validTransit, validWalking, type TransitStep, type TransitStepMode } from '../src/domain.ts';
+import { validTransit, validWalking, type Category, type TransitStep, type TransitStepMode } from '../src/domain.ts';
 
 type Env = Record<string, string | undefined>;
 type RecordValue = Record<string, unknown>;
@@ -56,12 +56,52 @@ export function parseTmap(body: RecordValue, key: string, mapAllowed: boolean) {
   const features = list(body.features).map(record);
   const props = record(features[0]?.properties);
   const seconds = Number(props.totalTime), meters = Number(props.totalDistance);
+  const taxiFare = Number(props.taxiFare);
   const lines = features.filter(f => record(f.geometry).type === 'LineString');
   const coordinates = lines.flatMap(f => list(record(f.geometry).coordinates));
-  const result = { key, minutes: Math.ceil(seconds / 60), meters, coordinates, fetchedAt: new Date().toISOString(), source: 'TMAP', mapAllowed };
-  if (!Number.isFinite(seconds) || !Number.isFinite(meters) || !validWalking(result)) throw new TransportError('upstream', '이 구간의 도보 경로를 찾지 못했어요.');
+  const result = {
+    key, minutes: Math.max(1, Math.ceil(seconds / 60)), meters, coordinates,
+    fetchedAt: new Date().toISOString(), source: 'TMAP', mapAllowed,
+    ...(Number.isFinite(taxiFare) && taxiFare > 0 ? { taxiFare: Math.round(taxiFare) } : {}),
+  };
+  if (!Number.isFinite(seconds) || !Number.isFinite(meters) || !validWalking(result)) throw new TransportError('upstream', '이 구간의 경로를 찾지 못했어요.');
   // Geometry is only returned when the operator has verified cross-map display rights.
   return mapAllowed ? result : { ...result, coordinates: [] };
+}
+function inferCategory(biz: string): Category {
+  if (/카페|커피|베이커리|제과|디저트|찻집/.test(biz)) return '카페';
+  if (/음식|식당|한식|중식|일식|양식|레스토랑|치킨|피자|분식|술집|주점|고기/.test(biz)) return '식사';
+  if (/공원|산책|숲|해수욕장|수목원|자연|관광명소|유원지|하천/.test(biz)) return '산책';
+  if (/영화|극장|박물관|미술관|전시|공연|문화|도서관|서점/.test(biz)) return '문화';
+  if (/백화점|마트|쇼핑|시장|아울렛|몰|소품/.test(biz)) return '쇼핑';
+  return '기타';
+}
+export function parseTmapPois(body: RecordValue): PoiItem[] {
+  const pois = list(record(record(body.searchPoiInfo).pois).poi).map(record);
+  const items: PoiItem[] = [];
+  for (const p of pois.slice(0, 15)) {
+    const name = str(p.name).trim();
+    const lng = Number(p.noorLon || p.frontLon), lat = Number(p.noorLat || p.frontLat);
+    if (!name || !Number.isFinite(lng) || !Number.isFinite(lat)) continue;
+    const roadList = list(record(p.newAddressList).newAddress).map(record);
+    const roadAddr = str(roadList[0]?.fullAddressRoad).trim();
+    const fallbackAddr = [str(p.upperAddrName), str(p.middleAddrName), str(p.lowerAddrName), str(p.detailAddrName)].filter(Boolean).join(' ');
+    const biz = `${str(p.upperBizName)} ${str(p.middleBizName)} ${str(p.lowerBizName)} ${name}`;
+    items.push({
+      id: str(p.id || `${lng},${lat}`),
+      name,
+      address: (roadAddr || fallbackAddr).slice(0, 200),
+      category: inferCategory(biz),
+      lng,
+      lat,
+    });
+  }
+  return items;
+}
+export function parseTmapReverseGeocode(body: RecordValue): { address: string } {
+  const info = record(body.addressInfo);
+  const address = str(info.fullAddress || [str(info.city_do), str(info.gu_gun), str(info.eup_myun), str(info.roadName), str(info.buildingIndex)].filter(Boolean).join(' ')).trim();
+  return { address };
 }
 function summarizeSteps(steps: TransitStep[], totalMinutes: number): string {
   const main = steps.filter(s => s.mode !== 'walk' && s.route).map(s => s.route!);
@@ -88,7 +128,7 @@ export function parseTmapTransit(body: RecordValue, key: string, mapAllowed: boo
       const start = record(rawLeg.start), end = record(rawLeg.end);
       const fromLng = Number(start.lon), fromLat = Number(start.lat);
       const stations = list(record(rawLeg.passStopList).stationList).map(record);
-      const stationId = str( stations[0]?.stationID || start.stationID || '' );
+      const stationId = str(stations[0]?.stationID || start.stationID || '');
       const stops = stations.length > 1 ? stations.length - 1 : undefined;
       const route = mode !== 'walk' ? str(rawLeg.route || rawLeg.routeName || '') : undefined;
       steps.push({
@@ -239,33 +279,61 @@ function cleanStationName(raw: string): string {
 }
 export async function transportData(params: URLSearchParams, env: Env = process.env, fetcher: typeof fetch = fetch): Promise<unknown> {
   const action = params.get('action');
+  const tmapEnabled = !!env.TMAP_APP_KEY && env.TMAP_FREE_PLAN_CONFIRMED === 'true';
   const transitEnabled = !!env.ODSAY_API_KEY || (!!env.TMAP_APP_KEY && (env.TMAP_TRANSIT_CONFIRMED === 'true' || env.TMAP_FREE_PLAN_CONFIRMED === 'true'));
   const transitMapAllowed = env.TRANSIT_MAP_DISPLAY_CONFIRMED === 'true' || env.TMAP_MAP_DISPLAY_CONFIRMED === 'true';
   if (action === 'status') return {
-    walking: !!env.TMAP_APP_KEY && env.TMAP_FREE_PLAN_CONFIRMED === 'true',
+    walking: tmapEnabled,
     walkingMap: env.TMAP_MAP_DISPLAY_CONFIRMED === 'true',
+    car: tmapEnabled,
+    pois: tmapEnabled,
     transit: transitEnabled,
     transitMap: transitMapAllowed,
-    seoul: !!env.SEOUL_BUS_SERVICE_KEY, gyeonggi: !!env.GYEONGGI_BUS_SERVICE_KEY,
+    seoul: !!env.SEOUL_BUS_SERVICE_KEY,
+    gyeonggi: !!(env.GYEONGGI_BUS_SERVICE_KEY || env.GYEONGGI_BUS_STATION_KEY),
     subway: !!env.SEOUL_SUBWAY_SERVICE_KEY,
   };
-  if (!['walk', 'transit', 'transit-live', 'stations', 'arrivals'].includes(action || '')) throw new TransportError('invalid', '지원하지 않는 조회예요.');
+  if (!['walk', 'car', 'pois', 'reverse-geocode', 'transit', 'transit-live', 'stations', 'arrivals'].includes(action || '')) {
+    throw new TransportError('invalid', '지원하지 않는 조회예요.');
+  }
   const cacheKey = params.toString();
   const hit = cache.get(cacheKey);
   if (hit && hit.until > Date.now()) return hit.data;
   if (inflight.has(cacheKey)) return inflight.get(cacheKey);
   const run = async () => {
-    if (action === 'walk') {
+    if (action === 'walk' || action === 'car') {
       const apiKey = required(env, 'TMAP_APP_KEY');
       if (env.TMAP_FREE_PLAN_CONFIRMED !== 'true') throw new TransportError('unconfigured', '무료 요금제와 호출 차단 설정 확인 후 연결할 수 있어요.');
       const [lng, lat] = point(params), [toLng, toLat] = point(params, 'to');
-      if (Math.hypot(toLng - lng, toLat - lat) > .4) throw new TransportError('unsupported', '장거리 구간은 대중교통으로 계획해 주세요.');
+      if (action === 'walk' && Math.hypot(toLng - lng, toLat - lat) > .4) throw new TransportError('unsupported', '장거리 구간은 대중교통이나 자동차로 계획해 주세요.');
       consume('tmap');
-      const body = await json('https://apis.openapi.sk.com/tmap/routes/pedestrian?version=1', {
+      const endpoint = action === 'walk'
+        ? 'https://apis.openapi.sk.com/tmap/routes/pedestrian?version=1'
+        : 'https://apis.openapi.sk.com/tmap/routes?version=1';
+      const body = await json(endpoint, {
         method: 'POST', headers: { appKey: apiKey, 'Content-Type': 'application/json' },
         body: JSON.stringify({ startX: lng, startY: lat, endX: toLng, endY: toLat, startName: '출발', endName: '도착', reqCoordType: 'WGS84GEO', resCoordType: 'WGS84GEO' }),
       }, fetcher);
       return parseTmap(body, `${lng},${lat}>${toLng},${toLat}`, env.TMAP_MAP_DISPLAY_CONFIRMED === 'true');
+    }
+    if (action === 'pois') {
+      const apiKey = required(env, 'TMAP_APP_KEY');
+      if (env.TMAP_FREE_PLAN_CONFIRMED !== 'true') throw new TransportError('unconfigured', 'TMAP 연결 확인 후 실시간 장소 검색을 사용할 수 있어요.');
+      const q = str(params.get('q')).trim();
+      if (q.length < 2) throw new TransportError('invalid', '검색어를 두 글자 이상 입력해 주세요.');
+      consume('tmap');
+      const query = new URLSearchParams({ version: '1', searchKeyword: q, count: '12', reqCoordType: 'WGS84GEO', resCoordType: 'WGS84GEO' });
+      const body = await json(`https://apis.openapi.sk.com/tmap/pois?${query}`, { headers: { appKey: apiKey, Accept: 'application/json' } }, fetcher);
+      return parseTmapPois(body);
+    }
+    if (action === 'reverse-geocode') {
+      const apiKey = required(env, 'TMAP_APP_KEY');
+      if (env.TMAP_FREE_PLAN_CONFIRMED !== 'true') throw new TransportError('unconfigured', 'TMAP 연결 확인 후 주소 변환을 사용할 수 있어요.');
+      const [lng, lat] = point(params);
+      consume('tmap');
+      const query = new URLSearchParams({ version: '1', lon: String(lng), lat: String(lat), coordType: 'WGS84GEO', addressType: 'A10' });
+      const body = await json(`https://apis.openapi.sk.com/tmap/geo/reversegeocoding?${query}`, { headers: { appKey: apiKey, Accept: 'application/json' } }, fetcher);
+      return parseTmapReverseGeocode(body);
     }
     if (action === 'transit') {
       const [lng, lat] = point(params), [toLng, toLat] = point(params, 'to');
@@ -302,7 +370,10 @@ export async function transportData(params: URLSearchParams, env: Env = process.
         return { stationName: `${cleanName}역`, route: targetRoute, matched, others: others.slice(0, 8), fetchedAt: new Date().toISOString(), source: '서울 실시간 지하철' } satisfies TransitLiveResult;
       }
       const region = params.get('region') === 'gyeonggi' ? 'gyeonggi' : 'seoul';
-      const apiKey = required(env, region === 'seoul' ? 'SEOUL_BUS_SERVICE_KEY' : 'GYEONGGI_BUS_SERVICE_KEY');
+      const stationApiKey = region === 'seoul'
+        ? required(env, 'SEOUL_BUS_SERVICE_KEY')
+        : (env.GYEONGGI_BUS_SERVICE_KEY || required(env, 'GYEONGGI_BUS_STATION_KEY'));
+      const arrivalApiKey = required(env, region === 'seoul' ? 'SEOUL_BUS_SERVICE_KEY' : 'GYEONGGI_BUS_SERVICE_KEY');
       let stationId = str(params.get('station'));
       let resolvedName = stationName || '승차 정류소';
       let resolvedNumber = stationId;
@@ -310,7 +381,7 @@ export async function transportData(params: URLSearchParams, env: Env = process.
       if (!validDirectId) {
         const [lng, lat] = point(params);
         const stQuery = new URLSearchParams();
-        stQuery.set(region === 'seoul' ? 'ServiceKey' : 'serviceKey', apiKey);
+        stQuery.set(region === 'seoul' ? 'ServiceKey' : 'serviceKey', stationApiKey);
         stQuery.set(region === 'seoul' ? 'resultType' : 'format', 'json');
         stQuery.set(region === 'seoul' ? 'tmX' : 'x', String(lng));
         stQuery.set(region === 'seoul' ? 'tmY' : 'y', String(lat));
@@ -328,7 +399,7 @@ export async function transportData(params: URLSearchParams, env: Env = process.
         stationId = best.id; resolvedName = best.name; resolvedNumber = best.number || best.id;
       }
       const arrQuery = new URLSearchParams();
-      arrQuery.set(region === 'seoul' ? 'ServiceKey' : 'serviceKey', apiKey);
+      arrQuery.set(region === 'seoul' ? 'ServiceKey' : 'serviceKey', arrivalApiKey);
       arrQuery.set(region === 'seoul' ? 'resultType' : 'format', 'json');
       arrQuery.set(region === 'seoul' ? 'arsId' : 'stationId', stationId);
       const arrEndpoint = region === 'seoul' ? 'https://ws.bus.go.kr/api/rest/stationinfo/getStationByUid' : 'https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2';
@@ -344,7 +415,9 @@ export async function transportData(params: URLSearchParams, env: Env = process.
     }
     const region = params.get('region');
     if (region !== 'seoul' && region !== 'gyeonggi') throw new TransportError('unsupported', '서울·경기 버스를 지원해요. 지역을 선택하세요.');
-    const apiKey = required(env, region === 'seoul' ? 'SEOUL_BUS_SERVICE_KEY' : 'GYEONGGI_BUS_SERVICE_KEY');
+    const apiKey = action === 'stations' && region === 'gyeonggi'
+      ? (env.GYEONGGI_BUS_SERVICE_KEY || required(env, 'GYEONGGI_BUS_STATION_KEY'))
+      : required(env, region === 'seoul' ? 'SEOUL_BUS_SERVICE_KEY' : 'GYEONGGI_BUS_SERVICE_KEY');
     const query = new URLSearchParams();
     query.set(region === 'seoul' ? 'ServiceKey' : 'serviceKey', apiKey);
     query.set(region === 'seoul' ? 'resultType' : 'format', 'json');
@@ -368,7 +441,9 @@ export async function transportData(params: URLSearchParams, env: Env = process.
     })).filter(s => s.id && s.name).slice(0, 20);
     return { arrivals: parseArrivals(body, region), fetchedAt: new Date().toISOString(), source: region === 'seoul' ? '서울 TOPIS' : '경기 GBIS' };
   };
-  const ttl = action === 'walk' ? 3600000 : action === 'transit' ? 1800000 : action === 'stations' ? 300000 : 30000;
+  const ttl = action === 'walk' || action === 'car' || action === 'reverse-geocode' ? 3600000
+    : action === 'transit' || action === 'pois' ? 1800000
+    : action === 'stations' ? 300000 : 30000;
   const pending = run().then(data => {
     if (cache.size > 200) cache.clear();
     cache.set(cacheKey, { until: Date.now() + ttl, data }); return data;

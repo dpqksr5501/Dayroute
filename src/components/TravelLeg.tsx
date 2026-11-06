@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { BusFront, Car, ChevronDown, ExternalLink, Footprints, RefreshCw, TrainFront, X } from 'lucide-react';
-import { hasCoordinates, transitFor, walkingFor, type Stop, type TransitLeg, type TravelMode, type WalkingLeg } from '../domain';
+import { carFor, hasCoordinates, transitFor, walkingFor, type Stop, type TransitLeg, type TravelMode, type WalkingLeg } from '../domain';
 import {
-  arrivalFresh, firstTransitStep, kakaoDirections, naverDirections,
+  arrivalFresh, carParams, firstTransitStep, kakaoDirections, naverDirections,
   transitLiveParams, transitParams, transportRequest, walkingParams,
   type TransitLiveResult, type TransitOption, type TransitRouteResult, type WalkingResult,
 } from '../transport';
@@ -28,6 +28,7 @@ export default function TravelLeg({ from, to, departure, region, readonly, onPat
 }) {
   const [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const [viewWalk, setViewWalk] = useState<WalkingLeg | null>(null);
+  const [viewCar, setViewCar] = useState<WalkingLeg | null>(null);
   const [viewTransit, setViewTransit] = useState<TransitLeg | null>(null);
   const [options, setOptions] = useState<TransitOption[]>([]);
   const [live, setLive] = useState<TransitLiveResult | null>(null), [liveBusy, setLiveBusy] = useState(false), [liveError, setLiveError] = useState('');
@@ -35,16 +36,17 @@ export default function TravelLeg({ from, to, departure, region, readonly, onPat
   const signature = `${from.lng},${from.lat}>${to.lng},${to.lat}:${from.mode}`;
 
   useEffect(() => {
-    setError(''); setLiveError(''); setViewWalk(null); setViewTransit(null); setOptions([]); setLive(null); setBusy(false); setLiveBusy(false);
+    setError(''); setLiveError(''); setViewWalk(null); setViewCar(null); setViewTransit(null); setOptions([]); setLive(null); setBusy(false); setLiveBusy(false);
     return () => { request.current?.abort(); liveRequest.current?.abort(); };
   }, [signature]);
 
   const walk = walkingFor(from, to) || viewWalk;
+  const car = carFor(from, to) || viewCar;
   const transit = transitFor(from, to) || viewTransit;
   const firstStep = firstTransitStep(transit ?? undefined);
   const Icon = icons[from.mode];
-  const minutes = walk?.minutes ?? transit?.minutes ?? from.travelMinutes;
-  const badge = walk ? 'TMAP 예상' : transit ? transit.summary : '직접 설정';
+  const minutes = walk?.minutes ?? car?.minutes ?? transit?.minutes ?? from.travelMinutes;
+  const badge = walk ? 'TMAP 도보' : car ? 'TMAP 자동차' : transit ? transit.summary : '직접 설정';
 
   const applyOption = (opt: TransitOption) => {
     const leg = stripOption(opt);
@@ -52,14 +54,16 @@ export default function TravelLeg({ from, to, departure, region, readonly, onPat
     if (readonly) setViewTransit(leg);
     else if (!onPatch({ transit: leg, travelMinutes: leg.minutes })) setError('조회 결과를 저장하지 못했어요.');
   };
-  const queryWalk = async () => {
+  const queryRoad = async (mode: 'walk' | 'car') => {
     if (request.current && !request.current.signal.aborted && busy) return;
     const controller = new AbortController(); request.current = controller; setBusy(true); setError('');
     try {
-      const data = await transportRequest<WalkingResult>(walkingParams(from, to), controller.signal, 3600000);
+      const params = mode === 'walk' ? walkingParams(from, to) : carParams(from, to);
+      const data = await transportRequest<WalkingResult>(params, controller.signal, 3600000);
       if (controller.signal.aborted) return;
-      if (readonly) setViewWalk(data);
-      else if (!onPatch({ walking: { key: data.key, minutes: data.minutes, meters: data.meters, coordinates: data.coordinates, fetchedAt: data.fetchedAt } })) setError('조회 결과를 저장하지 못했어요.');
+      const leg: WalkingLeg = { key: data.key, minutes: data.minutes, meters: data.meters, coordinates: data.coordinates, fetchedAt: data.fetchedAt };
+      if (readonly) { if (mode === 'walk') setViewWalk(leg); else setViewCar(leg); }
+      else if (!onPatch(mode === 'walk' ? { walking: leg } : { car: leg, travelMinutes: leg.minutes })) setError('조회 결과를 저장하지 못했어요.');
     } catch (e) { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : '조회하지 못했어요.'); }
     finally { if (request.current === controller) setBusy(false); }
   };
@@ -93,10 +97,10 @@ export default function TravelLeg({ from, to, departure, region, readonly, onPat
     {open && <div className="journey-details">
       <p className="journey-destination">{departure} 출발 · {to.name || '다음 장소'}까지</p>
       {!readonly && <div className="journey-inputs"><label>이동 수단<select aria-label={`${from.name}에서 이동수단`} value={from.mode} onChange={e => onPatch({ mode: e.target.value as TravelMode })}><option value="walk">도보</option><option value="transit">대중교통</option><option value="car">자동차</option></select></label>
-        <label>직접 설정 (분)<input aria-label={`${from.name}에서 이동 시간`} type="number" min={0} max={1440} value={from.travelMinutes} onChange={e => onPatch({ travelMinutes: Math.max(0, Math.min(1440, Number(e.target.value))), walking: undefined, transit: undefined })} /></label></div>}
+        <label>직접 설정 (분)<input aria-label={`${from.name}에서 이동 시간`} type="number" min={0} max={1440} value={from.travelMinutes} onChange={e => onPatch({ travelMinutes: Math.max(0, Math.min(1440, Number(e.target.value))), walking: undefined, car: undefined, transit: undefined })} /></label></div>}
       {from.mode === 'walk' && <>
         {walk && <p className="journey-source">{(walk.meters / 1000).toFixed(1)}km · {new Date(walk.fetchedAt).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} 조회<br />도보 예상 시간이에요. {walk.coordinates.length ? '실선은 조회한 도로 경로예요.' : '지도 경로 표시는 제공 조건 확인 후 연결돼요.'}</p>}
-        <div className="journey-buttons"><button className="secondary" disabled={busy || !hasCoordinates(from) || !hasCoordinates(to)} onClick={() => void queryWalk()}>{busy ? <span className="spinner" /> : <Footprints size={16} />}{busy ? '조회 중' : walk ? '도보 다시 조회' : '도보 경로 조회'}</button>{busy && <button className="icon-button" aria-label="도보 조회 취소" onClick={cancel}><X size={17} /></button>}</div>
+        <div className="journey-buttons"><button className="secondary" disabled={busy || !hasCoordinates(from) || !hasCoordinates(to)} onClick={() => void queryRoad('walk')}>{busy ? <span className="spinner" /> : <Footprints size={16} />}{busy ? '조회 중' : walk ? '도보 다시 조회' : '도보 경로 조회'}</button>{busy && <button className="icon-button" aria-label="도보 조회 취소" onClick={cancel}><X size={17} /></button>}</div>
         {(!hasCoordinates(from) || !hasCoordinates(to)) && <p className="journey-source">두 장소의 지도 위치를 먼저 지정하세요.</p>}
       </>}
       {from.mode === 'transit' && <>
@@ -149,7 +153,11 @@ export default function TravelLeg({ from, to, departure, region, readonly, onPat
         </div>}
         {!transit && <p className="journey-source">경로 조회로 버스·지하철 노선과 첫 승차 실시간 도착을 확인하거나 외부 지도를 이용하세요.</p>}
       </>}
-      {from.mode === 'car' && <p className="journey-source">자동차 시간은 직접 설정한 계획값이에요. 실시간 도로 상황은 외부 내비게이션에서 확인하세요.</p>}
+      {from.mode === 'car' && <>
+        {car && <p className="journey-source">{(car.meters / 1000).toFixed(1)}km · {new Date(car.fetchedAt).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} 조회<br />자동차 예상 시간이에요.</p>}
+        <div className="journey-buttons"><button className="secondary" disabled={busy || !hasCoordinates(from) || !hasCoordinates(to)} onClick={() => void queryRoad('car')}>{busy ? <span className="spinner" /> : <Car size={16} />}{busy ? '조회 중' : car ? '자동차 경로 다시 조회' : '자동차 경로 조회'}</button>{busy && <button className="icon-button" aria-label="자동차 조회 취소" onClick={cancel}><X size={17} /></button>}</div>
+        {(!hasCoordinates(from) || !hasCoordinates(to)) && <p className="journey-source">두 장소의 지도 위치를 먼저 지정하세요.</p>}
+      </>}
       {error && <p className="transport-error" role="status">{error}</p>}
       <div className="journey-links">
         <button className="text-button" onClick={onBus}><BusFront size={15} /> 주변 버스 도착</button>

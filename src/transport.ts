@@ -1,4 +1,4 @@
-import type { Stop, TransitLeg, TransitStep, WalkingLeg } from './domain.ts';
+import type { Category, Stop, TransitLeg, TransitStep, WalkingLeg } from './domain.ts';
 
 export type TransportCode = 'unconfigured' | 'unsupported' | 'quota' | 'upstream' | 'offline' | 'invalid';
 export class TransportError extends Error {
@@ -8,6 +8,7 @@ export class TransportError extends Error {
 export interface BusStation { id: string; name: string; region: 'seoul' | 'gyeonggi'; number?: string; distance?: number }
 export interface BusArrival { route: string; direction: string; first: string; second: string; stopsAway?: number }
 export interface BusResult { arrivals: BusArrival[]; fetchedAt: string; providerTime?: string; source: string }
+export interface PoiItem { id: string; name: string; address: string; category: Category; lng: number; lat: number }
 export interface TransitOption extends TransitLeg { id: string }
 export interface TransitRouteResult { options: TransitOption[]; fetchedAt: string; source: string; mapAllowed: boolean }
 export interface TransitLiveResult {
@@ -16,6 +17,7 @@ export interface TransitLiveResult {
 }
 export interface TransportStatus {
   walking: boolean; walkingMap: boolean;
+  car: boolean; pois: boolean;
   transit: boolean; transitMap: boolean;
   seoul: boolean; gyeonggi: boolean; subway: boolean;
 }
@@ -42,8 +44,11 @@ export async function transportRequest<T>(params: Record<string, string>, signal
 }
 export const coordinates = (s: Stop) => ({ lng: String(s.lng), lat: String(s.lat) });
 export const walkingParams = (a: Stop, b: Stop) => ({ action: 'walk', lng: String(a.lng), lat: String(a.lat), toLng: String(b.lng), toLat: String(b.lat) });
+export const carParams = (a: Stop, b: Stop) => ({ action: 'car', lng: String(a.lng), lat: String(a.lat), toLng: String(b.lng), toLat: String(b.lat) });
 export const transitParams = (a: Stop, b: Stop) => ({ action: 'transit', lng: String(a.lng), lat: String(a.lat), toLng: String(b.lng), toLat: String(b.lat) });
-export type WalkingResult = WalkingLeg & { source: string; mapAllowed: boolean };
+export const poiParams = (q: string) => ({ action: 'pois', q: q.trim() });
+export const reverseGeocodeParams = (lng: number, lat: number) => ({ action: 'reverse-geocode', lng: String(lng), lat: String(lat) });
+export type WalkingResult = WalkingLeg & { source: string; mapAllowed: boolean; taxiFare?: number };
 export function firstTransitStep(leg: TransitLeg | undefined): TransitStep | undefined {
   return leg?.steps.find(s => s.mode === 'bus' || s.mode === 'subway');
 }

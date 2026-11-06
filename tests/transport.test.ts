@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeShare, encodeShare, legMinutes, makeRoute, makeStop, routeText, transitFor, walkingKey } from '../src/domain.ts';
+import { carFor, decodeShare, encodeShare, legMinutes, makeRoute, makeStop, routeText, transitFor, walkingKey } from '../src/domain.ts';
 import { firstTransitStep, normalizeRouteName } from '../src/transport.ts';
-import { matchRouteArrivals, parseOdsayTransit, parseTmapTransit, transportData } from '../server/transport.ts';
+import { matchRouteArrivals, parseOdsayTransit, parseTmapPois, parseTmapReverseGeocode, parseTmapTransit, transportData } from '../server/transport.ts';
 
 test('normalizeRouteName and matchRouteArrivals match transit route numbers against station arrivals', () => {
   assert.equal(normalizeRouteName('간선:302'), '302');
@@ -137,3 +137,35 @@ test('domain schedule, share snapshot and routeText integrate saved transit legs
   const roundtrip = decodeShare(encodeShare(route));
   assert.equal(roundtrip.stops[0].transit?.summary, '2호선');
 });
+
+test('parseTmapPois, parseTmapReverseGeocode and carFor support TMAP place search, geocoding and driving legs', () => {
+  const pois = parseTmapPois({
+    searchPoiInfo: {
+      pois: {
+        poi: [{
+          id: '1001',
+          name: '성수 베이커리 카페',
+          noorLon: '127.0558',
+          noorLat: '37.5445',
+          upperBizName: '음식점',
+          middleBizName: '카페/디저트',
+          newAddressList: { newAddress: [{ fullAddressRoad: '서울특별시 성동구 연무장길 10' }] },
+        }],
+      },
+    },
+  });
+  assert.equal(pois.length, 1);
+  assert.equal(pois[0].category, '카페');
+  assert.equal(pois[0].address, '서울특별시 성동구 연무장길 10');
+
+  const geo = parseTmapReverseGeocode({ addressInfo: { fullAddress: '서울특별시 성동구 성수동2가 315-71' } });
+  assert.equal(geo.address, '서울특별시 성동구 성수동2가 315-71');
+
+  const a = makeStop({ name: '출발', lng: 127.05, lat: 37.54, mode: 'car', travelMinutes: 20 });
+  const b = makeStop({ name: '도착', lng: 127.10, lat: 37.51 });
+  a.car = { key: walkingKey(a, b), minutes: 12, meters: 5400, fetchedAt: new Date().toISOString(), coordinates: [] };
+  const route = { ...makeRoute(), stops: [a, b] };
+  assert.equal(carFor(a, b)?.minutes, 12);
+  assert.equal(legMinutes(route, 0), 12);
+});
+

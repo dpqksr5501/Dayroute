@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { GeoJSONSource } from 'maplibre-gl';
 import maplibregl from '../mapRuntime';
 import { Crosshair, RotateCcw } from 'lucide-react';
-import { hasCoordinates, transitFor, walkingFor, type Stop } from '../domain';
+import { carFor, hasCoordinates, transitFor, walkingFor, type Stop } from '../domain';
 import { mapPreviewPlan } from '../mapPreviewPlan';
 
 interface Props { stops: Stop[]; selectedId: string | null; onSelect: (id: string) => void;
@@ -95,7 +95,7 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
     const features = stops.flatMap((s, i) => {
       const next = stops[i + 1];
       if (!next || !hasCoordinates(s) || !hasCoordinates(next)) return [];
-      const walk = walkingFor(s, next), transit = transitFor(s, next);
+      const walk = walkingFor(s, next) ?? carFor(s, next), transit = transitFor(s, next);
       const road = !!walk?.coordinates.length, transitRoad = !!transit?.coordinates.length;
       const coordinates = road ? walk!.coordinates : transitRoad ? transit!.coordinates : [[s.lng, s.lat], [next.lng, next.lat]];
       return [{ type: 'Feature' as const, properties: { road, transit: transitRoad }, geometry: { type: 'LineString' as const, coordinates } }];
@@ -112,7 +112,7 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
     }
   }, [ready, selectedId]);
   useEffect(() => { if (map.current) map.current.getCanvas().style.cursor = picking ? 'crosshair' : ''; }, [ready, picking]);
-  const hasWalkRoad = stops.some((s, i) => walkingFor(s, stops[i + 1])?.coordinates.length);
+  const hasWalkRoad = stops.some((s, i) => (walkingFor(s, stops[i + 1]) ?? carFor(s, stops[i + 1]))?.coordinates.length);
   const hasTransitRoad = stops.some((s, i) => transitFor(s, stops[i + 1])?.coordinates.length);
   return <div className={`map-shell ${tour ? 'tour-map' : ''}`}>
     <div ref={container} className="map-canvas" aria-label="코스 지도" />
