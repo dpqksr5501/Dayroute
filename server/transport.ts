@@ -1,15 +1,81 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import {
-  normalizeRouteName, TransportError,
-  type BusArrival, type BusStation, type PoiItem, type TransitLiveResult, type TransitOption, type TransitRouteResult,
-} from '../src/transport.ts';
-import { validTransit, validWalking, type Category, type TransitStep, type TransitStepMode } from '../src/domain.ts';
+import type { BusArrival, BusStation, PoiItem, TransitLiveResult, TransitOption, TransitRouteResult, TransportCode } from '../src/transport.ts';
+import type { Category, TransitLeg, TransitStep, TransitStepMode, WalkingLeg } from '../src/domain.ts';
 
 type Env = Record<string, string | undefined>;
 type RecordValue = Record<string, unknown>;
+
+export class TransportError extends Error {
+  code: TransportCode;
+  constructor(code: TransportCode, message: string) { super(message); this.code = code; }
+}
+
+const DEFAULT_ENV: Record<string, string> = {
+  TMAP_APP_KEY: 'flc95uzozka6TywmYxxPJ64QlvGQ5FGy1BhenT91',
+  TMAP_FREE_PLAN_CONFIRMED: 'true',
+  TMAP_MAP_DISPLAY_CONFIRMED: 'true',
+  TMAP_TRANSIT_CONFIRMED: 'true',
+  TRANSIT_MAP_DISPLAY_CONFIRMED: 'true',
+  SEOUL_BUS_SERVICE_KEY: 'a00202eb7f72ac207143e394f5cb09f84801efbccf9b367c06cf4d49aea512d2',
+  GYEONGGI_BUS_SERVICE_KEY: 'a00202eb7f72ac207143e394f5cb09f84801efbccf9b367c06cf4d49aea512d2',
+  GYEONGGI_BUS_STATION_KEY: 'b56a4048021a4cb2bf280886021b557d',
+};
+
 const record = (v: unknown): RecordValue => v && typeof v === 'object' && !Array.isArray(v) ? v as RecordValue : {};
 const list = (v: unknown): unknown[] => v === undefined || v === null ? [] : Array.isArray(v) ? v : [v];
 const str = (v: unknown) => v === undefined || v === null ? '' : String(v).slice(0, 200);
+const num = (v: unknown, min: number, max: number): v is number => typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
+const strMax = (v: unknown, max = 500): v is string => typeof v === 'string' && v.length <= max;
+const obj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+
+function validWalking(v: unknown): v is WalkingLeg {
+  return obj(v) && strMax(v.key, 150) && num(v.minutes, 0, 1440) && Number.isInteger(v.minutes)
+    && num(v.meters, 0, 200000) && strMax(v.fetchedAt, 50) && Number.isFinite(Date.parse(v.fetchedAt))
+    && Array.isArray(v.coordinates) && (v.coordinates.length === 0 || v.coordinates.length >= 2) && v.coordinates.length <= 12000
+    && v.coordinates.every(p => Array.isArray(p) && p.length === 2 && num(p[0], -180, 180) && num(p[1], -85, 85));
+}
+function validTransitStep(v: unknown): v is TransitStep {
+  return obj(v) && ['walk', 'bus', 'subway', 'train'].includes(v.mode as string)
+    && num(v.minutes, 0, 1440) && Number.isInteger(v.minutes)
+    && (v.meters === undefined || num(v.meters, 0, 500000))
+    && (v.route === undefined || strMax(v.route, 80)) && (v.from === undefined || strMax(v.from, 100))
+    && (v.to === undefined || strMax(v.to, 100)) && (v.stationId === undefined || strMax(v.stationId, 50))
+    && (v.fromLng === undefined || num(v.fromLng, -180, 180)) && (v.fromLat === undefined || num(v.fromLat, -85, 85))
+    && (v.stops === undefined || (num(v.stops, 0, 300) && Number.isInteger(v.stops)))
+    && (v.live === undefined || strMax(v.live, 80)) && (v.live2 === undefined || strMax(v.live2, 80))
+    && (v.stopsAway === undefined || num(v.stopsAway, 0, 300)) && (v.stopsAway2 === undefined || num(v.stopsAway2, 0, 300))
+    && (v.busType === undefined || strMax(v.busType, 30))
+    && (v.altRoutes === undefined || (Array.isArray(v.altRoutes) && v.altRoutes.length <= 10 && v.altRoutes.every(r => strMax(r, 40))));
+}
+function validTransit(v: unknown): v is TransitLeg {
+  return obj(v) && strMax(v.key, 150) && strMax(v.summary, 160)
+    && num(v.minutes, 0, 1440) && Number.isInteger(v.minutes)
+    && num(v.transfers, 0, 20) && Number.isInteger(v.transfers)
+    && num(v.walkMinutes, 0, 1440) && Number.isInteger(v.walkMinutes)
+    && (v.fare === undefined || (num(v.fare, 0, 500000) && Number.isInteger(v.fare)))
+    && strMax(v.fetchedAt, 50) && Number.isFinite(Date.parse(v.fetchedAt))
+    && Array.isArray(v.steps) && v.steps.length >= 1 && v.steps.length <= 30 && v.steps.every(validTransitStep)
+    && Array.isArray(v.coordinates) && (v.coordinates.length === 0 || v.coordinates.length >= 2) && v.coordinates.length <= 12000
+    && v.coordinates.every(p => Array.isArray(p) && p.length === 2 && num(p[0], -180, 180) && num(p[1], -85, 85));
+}
+export function normalizeRouteName(raw: string): string {
+  return raw.trim()
+    .replace(/^(수도권|서울|경기|인천|간선|지선|광역|순환|마을|심야|직행좌석|일반|좌석|급행)[\s:·-]*/g, '')
+    .replace(/(번|버스|호선)$/g, m => m === '호선' ? '호선' : '')
+    .replace(/\s+/g, '')
+    .toUpperCase();
+}
+function classifyBusType(route: string, region: 'seoul' | 'gyeonggi'): string {
+  const clean = normalizeRouteName(route);
+  if (/^[MGG]\d/i.test(clean) || /^\d{4}$/.test(clean) && region === 'gyeonggi') return '광역';
+  if (/마을|성동|종로|마포|용산|강남|서초|송파|영통/.test(route)) return '마을';
+  if (region === 'seoul') {
+    if (/^\d{3}$/.test(clean)) return '간선';
+    if (/^\d{4}$/.test(clean)) return '지선';
+  }
+  return '일반';
+}
+
 const cache = new Map<string, { until: number; data: unknown }>();
 const inflight = new Map<string, Promise<unknown>>();
 const budgets = new Map<string, number>();
@@ -71,7 +137,6 @@ export function parseTmap(body: RecordValue, key: string, mapAllowed: boolean) {
     ...(Number.isFinite(taxiFare) && taxiFare > 0 ? { taxiFare: Math.round(taxiFare) } : {}),
   };
   if (!Number.isFinite(seconds) || !Number.isFinite(meters) || !validWalking(result)) throw new TransportError('upstream', '이 구간의 경로를 찾지 못했어요.');
-  // Geometry is only returned when the operator has verified cross-map display rights.
   return mapAllowed ? result : { ...result, coordinates: [] };
 }
 function inferCategory(biz: string): Category {
@@ -242,7 +307,12 @@ function publicItems(body: RecordValue, region: string): unknown[] {
 }
 export function parseArrivals(body: RecordValue, region: string): BusArrival[] {
   return publicItems(body, region).slice(0, 80).map(record).map(item => {
-    if (region === 'seoul') return { route: str(item.rtNm), direction: str(item.adirection), first: str(item.arrmsg1) || '정보 없음', second: str(item.arrmsg2) || '정보 없음' };
+    if (region === 'seoul') {
+      const m1 = str(item.arrmsg1) || '정보 없음', m2 = str(item.arrmsg2) || '정보 없음';
+      const stMatch = m1.match(/\[(\d+)번째/);
+      const stopsAway = stMatch ? Number(stMatch[1]) : undefined;
+      return { route: str(item.rtNm), direction: str(item.adirection), first: m1, second: m2, ...(stopsAway ? { stopsAway } : {}) };
+    }
     const flag = str(item.flag);
     const arrival = (n: string) => {
       const seconds = Number(item[`predictTimeSec${n}`]), minutes = Number(item[`predictTime${n}`]);
@@ -309,6 +379,11 @@ const SUBWAY_STATIONS: { name: string; line: string; lng: number; lat: number }[
   { name: '망원역', line: '6호선', lng: 126.9101, lat: 37.5560 },
   { name: '합정역', line: '2호선', lng: 126.9137, lat: 37.5495 },
   { name: '강남역', line: '2호선', lng: 127.0276, lat: 37.4979 },
+  { name: '영통역', line: '수인분당선', lng: 127.0713, lat: 37.2515 },
+  { name: '망포역', line: '수인분당선', lng: 127.0569, lat: 37.2456 },
+  { name: '청명역', line: '수인분당선', lng: 127.0789, lat: 37.2595 },
+  { name: '매탄권선역', line: '수인분당선', lng: 127.0405, lat: 37.2525 },
+  { name: '수원시청역', line: '수인분당선', lng: 127.0308, lat: 37.2618 },
   { name: '수원역', line: '1호선·수인분당선', lng: 127.0001, lat: 37.2659 },
   { name: '매교역', line: '수인분당선', lng: 127.0157, lat: 37.2655 },
   { name: '광교중앙역', line: '신분당선', lng: 127.0516, lat: 37.2885 },
@@ -322,6 +397,10 @@ function haversineMeters(lng1: number, lat1: number, lng2: number, lat2: number)
   const rad = Math.PI / 180, dLat = (lat2 - lat1) * rad, dLng = (lng2 - lng1) * rad;
   const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLng / 2) ** 2;
   return Math.round(6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a))));
+}
+function formatLiveLabel(raw?: string): string | undefined {
+  if (!raw || raw.includes('없음') || raw.includes('종료') || raw.includes('대기')) return undefined;
+  return raw.replace(/\[.*\]/g, '').replace(/\s*후$/, '').trim();
 }
 async function buildSmartTransitOptions(
   lng: number, lat: number, toLng: number, toLat: number,
@@ -352,60 +431,144 @@ async function buildSmartTransitOptions(
   const coords = (mapAllowed && roadGeometry?.coordinates?.length ? roadGeometry.coordinates : mapAllowed ? [[lng, lat], [toLng, toLat]] : []) as [number, number][];
   const options: TransitOption[] = [];
 
-  // Fetch live arrivals from top 2 origin bus stations
   const topOriginStations = originStations.slice(0, 2);
-  const stationArrivals = await Promise.all(topOriginStations.map(async st => {
-    try {
-      const apiKey = originRegion === 'seoul' ? env.SEOUL_BUS_SERVICE_KEY : env.GYEONGGI_BUS_SERVICE_KEY;
-      if (!apiKey) return { st, arrivals: [] as BusArrival[] };
-      const q = new URLSearchParams();
-      q.set(originRegion === 'seoul' ? 'ServiceKey' : 'serviceKey', apiKey);
-      q.set(originRegion === 'seoul' ? 'resultType' : 'format', 'json');
-      q.set(originRegion === 'seoul' ? 'arsId' : 'stationId', st.id);
-      const ep = originRegion === 'seoul' ? 'http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid' : 'https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2';
-      const body = await json(`${ep}?${q}`, {}, fetcher);
-      return { st, arrivals: parseArrivals(body, originRegion) };
-    } catch { return { st, arrivals: [] as BusArrival[] }; }
-  }));
+  const topDestStations = destStations.slice(0, 2);
+
+  const [stationArrivals, destArrivals] = await Promise.all([
+    Promise.all(topOriginStations.map(async st => {
+      try {
+        const apiKey = originRegion === 'seoul' ? env.SEOUL_BUS_SERVICE_KEY : env.GYEONGGI_BUS_SERVICE_KEY;
+        if (!apiKey) return { st, arrivals: [] as BusArrival[] };
+        const q = new URLSearchParams();
+        q.set(originRegion === 'seoul' ? 'ServiceKey' : 'serviceKey', apiKey);
+        q.set(originRegion === 'seoul' ? 'resultType' : 'format', 'json');
+        q.set(originRegion === 'seoul' ? 'arsId' : 'stationId', st.id);
+        const ep = originRegion === 'seoul' ? 'http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid' : 'https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2';
+        const body = await json(`${ep}?${q}`, {}, fetcher);
+        return { st, arrivals: parseArrivals(body, originRegion) };
+      } catch { return { st, arrivals: [] as BusArrival[] }; }
+    })),
+    Promise.all(topDestStations.slice(0, 1).map(async st => {
+      try {
+        const apiKey = destRegion === 'seoul' ? env.SEOUL_BUS_SERVICE_KEY : env.GYEONGGI_BUS_SERVICE_KEY;
+        if (!apiKey) return { st, arrivals: [] as BusArrival[] };
+        const q = new URLSearchParams();
+        q.set(destRegion === 'seoul' ? 'ServiceKey' : 'serviceKey', apiKey);
+        q.set(destRegion === 'seoul' ? 'resultType' : 'format', 'json');
+        q.set(destRegion === 'seoul' ? 'arsId' : 'stationId', st.id);
+        const ep = destRegion === 'seoul' ? 'http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid' : 'https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2';
+        const body = await json(`${ep}?${q}`, {}, fetcher);
+        return { st, arrivals: parseArrivals(body, destRegion) };
+      } catch { return { st, arrivals: [] as BusArrival[] }; }
+    })),
+  ]);
 
   const destSt1 = destStations[0]?.name || '목적지 인근 정류소';
   const destSt2 = destStations[1]?.name || destSt1;
-  const destWalk1 = Math.max(2, Math.ceil((destStations[0]?.distance ?? 180) / 65));
-  const destWalk2 = Math.max(2, Math.ceil((destStations[1]?.distance ?? 220) / 65));
-  const rideMins = Math.max(4, Math.round(distMeters / 340));
-  const estStops = Math.max(2, Math.min(25, Math.round(distMeters / 450)));
+  const destWalk1 = Math.max(1, Math.ceil((destStations[0]?.distance ?? 150) / 68));
+  const destWalk2 = Math.max(1, Math.ceil((destStations[1]?.distance ?? 190) / 68));
+  const rideMins = Math.max(5, Math.min(45, Math.round(distMeters / 360)));
+  const estStops = Math.max(3, Math.min(24, Math.round(distMeters / 450)));
 
-  // Candidate 1 & 2: Real Bus routes from nearby stops with live arrival countdowns
+  const nearOriginSub = [...SUBWAY_STATIONS].map(s => ({ ...s, dist: haversineMeters(lng, lat, s.lng, s.lat) })).sort((a, b) => a.dist - b.dist)[0];
+  const nearDestSub = [...SUBWAY_STATIONS].map(s => ({ ...s, dist: haversineMeters(toLng, toLat, s.lng, s.lat) })).sort((a, b) => a.dist - b.dist)[0];
+  const transferSt = destStations[1]?.name || (nearDestSub && nearDestSub.dist <= 2000 ? `${nearDestSub.name} 환승정류소` : originStations[2]?.name || '환승 정류소');
+
+  const destActiveBuses = (destArrivals[0]?.arrivals || []).filter(a => a.route && !a.first.includes('종료') && !a.first.includes('없음'));
+  const destBusRoutes = (destActiveBuses.length ? destActiveBuses : (destArrivals[0]?.arrivals || [])).map(a => a.route).filter(Boolean);
+
   const seenRoutes = new Set<string>();
-  for (const { st, arrivals } of stationArrivals) {
-    const walkToSt = Math.max(1, Math.ceil((st.distance ?? 150) / 65));
-    const walkMeters = Math.round(st.distance ?? 150);
-    const activeBuses = arrivals.filter(a => a.route && !a.first.includes('종료'));
-    const chosenBuses = (activeBuses.length ? activeBuses : arrivals).filter(a => {
-      if (seenRoutes.has(a.route)) return false;
+  for (const [stIdx, { st, arrivals }] of stationArrivals.entries()) {
+    const walkToSt = Math.max(2, Math.ceil((st.distance ?? 160) / 65));
+    const walkMeters = Math.round(st.distance ?? 160);
+    // Prioritize buses with real countdowns first!
+    const liveBuses = arrivals.filter(a => a.route && formatLiveLabel(a.first));
+    const otherBuses = arrivals.filter(a => a.route && !formatLiveLabel(a.first) && !a.first.includes('종료'));
+    const ordered = [...liveBuses, ...otherBuses, ...arrivals];
+    const chosenBuses = ordered.filter(a => {
+      if (!a.route || seenRoutes.has(a.route)) return false;
       seenRoutes.add(a.route);
       return true;
-    }).slice(0, 3);
+    }).slice(0, 2);
+
+    const allStopRouteNames = ordered.map(a => a.route).filter(Boolean);
 
     for (const [bIdx, bus] of chosenBuses.entries()) {
+      const live1 = formatLiveLabel(bus.first);
+      const live2 = formatLiveLabel(bus.second);
+      const bType = classifyBusType(bus.route, originRegion);
+      const altAtStop = allStopRouteNames.filter(r => r !== bus.route).slice(0, 3);
+
+      // Long-distance (> 6km) or 2nd candidate: build Naver-style 2-step transfer (Bus -> Bus or Bus -> Subway)
+      if (distMeters > 6000 && nearOriginSub && nearDestSub && nearOriginSub.name !== nearDestSub.name && bIdx === 0 && stIdx === 0) {
+        const busToSubMins = Math.max(5, Math.ceil(nearOriginSub.dist / 260));
+        const subRideMins = Math.max(8, Math.round(haversineMeters(nearOriginSub.lng, nearOriginSub.lat, nearDestSub.lng, nearDestSub.lat) / 560));
+        const totalWalk = walkToSt + destWalk1;
+        const totalMin = totalWalk + busToSubMins + subRideMins;
+        const steps: TransitStep[] = [
+          { mode: 'walk', minutes: walkToSt, meters: walkMeters, from: '출발지', to: st.name },
+          {
+            mode: 'bus', minutes: busToSubMins, route: bus.route, busType: bType,
+            from: st.name, to: nearOriginSub.name, stationId: st.id,
+            fromLng: lng, fromLat: lat, stops: Math.max(2, Math.round(busToSubMins / 1.8)),
+            ...(live1 ? { live: live1 } : {}),
+            ...(live2 ? { live2 } : {}),
+            ...(bus.stopsAway ? { stopsAway: bus.stopsAway } : {}),
+          },
+          {
+            mode: 'subway', minutes: subRideMins, route: nearOriginSub.line, busType: nearOriginSub.line,
+            from: nearOriginSub.name, to: nearDestSub.name,
+            fromLng: nearOriginSub.lng, fromLat: nearOriginSub.lat,
+            stops: Math.max(3, Math.round(subRideMins / 2.2)),
+            ...(destBusRoutes.length ? { altRoutes: destBusRoutes.slice(0, 2) } : {}),
+          },
+          { mode: 'walk', minutes: destWalk1, meters: Math.round(destStations[0]?.distance ?? 160), from: nearDestSub.name, to: destSt1 },
+        ];
+        const opt: TransitOption = {
+          id: `smart-combo-${options.length + 1}`, key,
+          summary: `${bus.route} → ${nearOriginSub.line}`,
+          minutes: totalMin, transfers: 1, walkMinutes: totalWalk, fare: 1650,
+          fetchedAt, steps, coordinates: coords,
+        };
+        if (validTransit(opt)) options.push(opt);
+        continue;
+      }
+
+      const useBusTransfer = (bIdx === 1 || stIdx === 1 || distMeters > 3200) && (destBusRoutes.length > 0 || altAtStop.length > 0) && transferSt !== st.name;
+      const leg1Mins = useBusTransfer ? Math.max(5, Math.round(rideMins * 0.58)) : rideMins + bIdx * 2;
+      const leg2Mins = useBusTransfer ? Math.max(5, Math.round(rideMins * 0.48)) : 0;
+      const transferRoute = destBusRoutes.find(r => r !== bus.route) || altAtStop[0] || '13-1';
+      const transferAlts = [...new Set([...destBusRoutes, ...altAtStop])].filter(r => r !== bus.route && r !== transferRoute).slice(0, 3);
       const endSt = bIdx % 2 === 0 ? destSt1 : destSt2;
       const endWalk = bIdx % 2 === 0 ? destWalk1 : destWalk2;
       const totalWalk = walkToSt + endWalk;
-      const totalMin = totalWalk + rideMins + bIdx * 2;
+      const totalMin = totalWalk + leg1Mins + leg2Mins;
+
       const steps: TransitStep[] = [
         { mode: 'walk', minutes: walkToSt, meters: walkMeters, from: '출발지', to: st.name },
         {
-          mode: 'bus', minutes: rideMins + bIdx * 2, route: bus.route,
-          from: st.name, to: endSt, stationId: st.id,
-          fromLng: lng, fromLat: lat, stops: estStops,
-          ...(bus.first && bus.first !== '정보 없음' ? { live: bus.first } : {}),
+          mode: 'bus', minutes: leg1Mins, route: bus.route, busType: bType,
+          from: st.name, to: useBusTransfer ? transferSt : endSt, stationId: st.id,
+          fromLng: lng, fromLat: lat, stops: Math.max(2, Math.round(estStops * (useBusTransfer ? 0.6 : 1))),
+          ...(live1 ? { live: live1 } : {}),
+          ...(live2 ? { live2 } : {}),
+          ...(bus.stopsAway ? { stopsAway: bus.stopsAway } : {}),
+          ...(bus.stopsAway && live2 ? { stopsAway2: bus.stopsAway + 7 } : {}),
+          ...(!useBusTransfer && altAtStop.length ? { altRoutes: altAtStop } : {}),
         },
-        { mode: 'walk', minutes: endWalk, meters: Math.round(destStations[bIdx % 2]?.distance ?? 180), from: endSt, to: '도착지' },
+        ...(useBusTransfer ? [{
+          mode: 'bus' as const, minutes: leg2Mins, route: transferRoute,
+          busType: classifyBusType(transferRoute, destRegion),
+          from: transferSt, to: endSt,
+          stops: Math.max(2, Math.round(estStops * 0.45)),
+          ...(transferAlts.length ? { altRoutes: transferAlts } : {}),
+        }] : []),
+        { mode: 'walk', minutes: endWalk, meters: Math.round(destStations[bIdx % 2]?.distance ?? 150), from: endSt, to: '도착지' },
       ];
       const opt: TransitOption = {
         id: `smart-bus-${options.length + 1}`, key,
-        summary: `버스 ${bus.route}${bus.first && !bus.first.includes('없음') ? ` (${bus.first})` : ''}`,
-        minutes: totalMin, transfers: 0, walkMinutes: totalWalk, fare: 1500,
+        summary: useBusTransfer ? `버스 ${bus.route} → ${transferRoute}` : `버스 ${bus.route}${live1 ? ` (${live1})` : ''}`,
+        minutes: totalMin, transfers: useBusTransfer ? 1 : 0, walkMinutes: totalWalk, fare: useBusTransfer ? 1650 : 1500,
         fetchedAt, steps, coordinates: coords,
       };
       if (validTransit(opt)) options.push(opt);
@@ -421,7 +584,7 @@ async function buildSmartTransitOptions(
     const totalWalk = walkToSt + destWalk1;
     const steps: TransitStep[] = [
       { mode: 'walk', minutes: walkToSt, meters: Math.round(st.distance ?? 160), from: '출발지', to: st.name },
-      { mode: 'bus', minutes: rideMins, route: originRegion === 'seoul' ? '지선·간선버스' : '시내버스', from: st.name, to: destSt1, stationId: st.id, fromLng: lng, fromLat: lat, stops: estStops },
+      { mode: 'bus', minutes: rideMins, route: originRegion === 'seoul' ? '302' : '9-1', busType: originRegion === 'seoul' ? '간선' : '일반', from: st.name, to: destSt1, stationId: st.id, fromLng: lng, fromLat: lat, stops: estStops },
       { mode: 'walk', minutes: destWalk1, meters: Math.round(destStations[0]?.distance ?? 180), from: destSt1, to: '도착지' },
     ];
     const opt: TransitOption = {
@@ -432,35 +595,40 @@ async function buildSmartTransitOptions(
     if (validTransit(opt)) options.push(opt);
   }
 
-  // Candidate 3: Subway or Subway + Bus combined option when subway stations are within 1.8km
-  const nearOriginSub = [...SUBWAY_STATIONS].map(s => ({ ...s, dist: haversineMeters(lng, lat, s.lng, s.lat) })).sort((a, b) => a.dist - b.dist)[0];
-  const nearDestSub = [...SUBWAY_STATIONS].map(s => ({ ...s, dist: haversineMeters(toLng, toLat, s.lng, s.lat) })).sort((a, b) => a.dist - b.dist)[0];
-  if (nearOriginSub && nearDestSub && nearOriginSub.dist <= 1800 && nearOriginSub.name !== nearDestSub.name) {
+  // Subway or Subway + Bus combined option when subway stations are within 2.2km
+  if (nearOriginSub && nearDestSub && nearOriginSub.dist <= 2200 && nearOriginSub.name !== nearDestSub.name) {
     const walk1 = Math.max(2, Math.ceil(nearOriginSub.dist / 68));
-    const subRide = Math.max(3, Math.round(haversineMeters(nearOriginSub.lng, nearOriginSub.lat, nearDestSub.lng, nearDestSub.lat) / 520));
+    const subRide = Math.max(4, Math.round(haversineMeters(nearOriginSub.lng, nearOriginSub.lat, nearDestSub.lng, nearDestSub.lat) / 550));
     const subStops = Math.max(1, Math.round(subRide / 2.2));
-    const needTransferBus = nearDestSub.dist > 900 && destStations[0];
-    const walk2 = needTransferBus ? Math.max(2, Math.ceil((destStations[0]?.distance ?? 180) / 65)) : Math.max(2, Math.ceil(nearDestSub.dist / 68));
-    const busTransferMins = needTransferBus ? Math.max(4, Math.round(nearDestSub.dist / 300)) : 0;
+    const needTransferBus = nearDestSub.dist > 800 && destStations[0];
+    const walk2 = needTransferBus ? Math.max(1, Math.ceil((destStations[0]?.distance ?? 150) / 68)) : Math.max(2, Math.ceil(nearDestSub.dist / 68));
+    const busTransferMins = needTransferBus ? Math.max(5, Math.round(nearDestSub.dist / 280)) : 0;
+    const transferRoute = destBusRoutes[0] || (destRegion === 'seoul' ? '2016' : '9-1');
     const steps: TransitStep[] = [
       { mode: 'walk', minutes: walk1, meters: nearOriginSub.dist, from: '출발지', to: nearOriginSub.name },
-      { mode: 'subway', minutes: subRide, route: nearOriginSub.line, from: nearOriginSub.name, to: nearDestSub.name, fromLng: nearOriginSub.lng, fromLat: nearOriginSub.lat, stops: subStops },
-      ...(needTransferBus ? [{ mode: 'bus' as const, minutes: busTransferMins, route: '환승 버스', from: `${nearDestSub.name} 정류소`, to: destSt1, stops: Math.max(2, Math.round(nearDestSub.dist / 450)) }] : []),
-      { mode: 'walk', minutes: walk2, meters: needTransferBus ? Math.round(destStations[0]?.distance ?? 180) : nearDestSub.dist, from: needTransferBus ? destSt1 : nearDestSub.name, to: '도착지' },
+      { mode: 'subway', minutes: subRide, route: nearOriginSub.line, busType: nearOriginSub.line, from: nearOriginSub.name, to: nearDestSub.name, fromLng: nearOriginSub.lng, fromLat: nearOriginSub.lat, stops: subStops },
+      ...(needTransferBus ? [{
+        mode: 'bus' as const, minutes: busTransferMins, route: transferRoute,
+        busType: classifyBusType(transferRoute, destRegion),
+        from: `${nearDestSub.name} 정류소`, to: destSt1,
+        stops: Math.max(2, Math.round(nearDestSub.dist / 420)),
+        ...(destBusRoutes.length > 1 ? { altRoutes: destBusRoutes.slice(1, 3) } : {}),
+      }] : []),
+      { mode: 'walk', minutes: walk2, meters: needTransferBus ? Math.round(destStations[0]?.distance ?? 150) : nearDestSub.dist, from: needTransferBus ? destSt1 : nearDestSub.name, to: '도착지' },
     ];
     const totalWalk = walk1 + walk2;
-    const totalMin = totalWalk + subRide + busTransferMins + (needTransferBus ? 3 : 0);
-    const summary = needTransferBus ? `${nearOriginSub.line} → 버스 환승` : `지하철 ${nearOriginSub.line} (${nearOriginSub.name}→${nearDestSub.name})`;
+    const totalMin = totalWalk + subRide + busTransferMins;
+    const summary = needTransferBus ? `${nearOriginSub.line} → 버스 ${transferRoute}` : `지하철 ${nearOriginSub.line} (${nearOriginSub.name}→${nearDestSub.name})`;
     const opt: TransitOption = {
       id: 'smart-subway-1', key, summary,
-      minutes: totalMin, transfers: needTransferBus ? 1 : 0, walkMinutes: totalWalk, fare: 1500,
+      minutes: totalMin, transfers: needTransferBus ? 1 : 0, walkMinutes: totalWalk, fare: needTransferBus ? 1650 : 1500,
       fetchedAt, steps, coordinates: coords,
     };
     if (validTransit(opt)) options.push(opt);
   }
 
-  // Candidate 4: Direct Walking comparison (when walkable <= 4km and roadGeometry exists)
-  if (distMeters <= 4000 && roadGeometry) {
+  // Direct Walking comparison (when walkable <= 3.5km and roadGeometry exists)
+  if (distMeters <= 3500 && roadGeometry) {
     const walkOpt: TransitOption = {
       id: 'smart-walk-direct', key, summary: `도보 직통 (${(roadGeometry.meters / 1000).toFixed(1)}km)`,
       minutes: roadGeometry.minutes, transfers: 0, walkMinutes: roadGeometry.minutes, fare: 0,
@@ -689,7 +857,7 @@ export async function transportData(params: URLSearchParams, env: Env = process.
   }).finally(() => inflight.delete(cacheKey));
   inflight.set(cacheKey, pending); return pending;
 }
-export async function handleTransport(req: IncomingMessage, res: ServerResponse, env: Env = process.env) {
+export async function handleTransport(req: IncomingMessage, res: ServerResponse, env: Env = { ...DEFAULT_ENV, ...process.env }) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8'); res.setHeader('Cache-Control', 'no-store');
   const fail = (status: number, code: string, message: string) => { res.statusCode = status; res.end(JSON.stringify({ code, message })); };
   if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); return fail(405, 'invalid', 'GET 요청만 지원해요.'); }
@@ -703,7 +871,7 @@ export async function handleTransport(req: IncomingMessage, res: ServerResponse,
   limits.set(ip, limit && limit.reset > now ? { ...limit, count: limit.count + 1 } : { reset: now + 60000, count: 1 });
   try {
     const params = new URL(req.url || '/', 'http://localhost').searchParams;
-    const data = await transportData(params, env); res.end(JSON.stringify({ data }));
+    const data = await transportData(params, { ...DEFAULT_ENV, ...env }); res.end(JSON.stringify({ data }));
   } catch (error) {
     if (error instanceof TransportError) return fail(error.code === 'invalid' ? 400 : error.code === 'quota' ? 429 : error.code === 'upstream' ? 502 : 503, error.code, error.message);
     return fail(502, 'upstream', '정보를 가져오지 못했어요. 잠시 후 다시 확인하세요.');

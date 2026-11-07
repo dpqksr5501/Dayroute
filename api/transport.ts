@@ -1,2 +1,3 @@
-import { handleTransport } from '../server/transport.ts';
+import { handleTransport } from '../server/transport';
 export default handleTransport;
+

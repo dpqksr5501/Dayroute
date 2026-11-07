@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowRight, BusFront, Check, ExternalLink, LocateFixed, MapPin, RefreshCw, TrainFront, X } from 'lucide-react';
+import { BusFront, ExternalLink, LocateFixed, MapPin, RefreshCw, TrainFront, X } from 'lucide-react';
 import { hasCoordinates, makeStop, transitFor, walkingFor, type Stop, type TransitLeg } from '../domain';
 import {
   arrivalFresh, coordinates, kakaoDirections, naverDirections,
@@ -8,9 +8,7 @@ import {
 } from '../transport';
 import type { UserLocation } from './MapView';
 import Modal from './Modal';
-
-const stepIcons = { walk: '🚶', bus: '🚌', subway: '🚇', train: '🚆' };
-const stepNames = { walk: '도보', bus: '버스', subway: '지하철', train: '열차' };
+import TransitCandidateCard from './TransitCandidateCard';
 
 function stripOption(opt: TransitOption): TransitLeg {
   const { key, summary, minutes, transfers, walkMinutes, fare, fetchedAt, steps, coordinates: coords } = opt;
@@ -165,63 +163,35 @@ export default function BusPanel({
             {loading && <p className="transport-loading" role="status"><span className="spinner" /> 실시간 버스·지하철·도보 후보 조합을 계산하고 있어요…</p>}
             {err && <p className="transport-error" role="status">{err}</p>}
 
-            {opts.length > 0 && <div className="candidate-list" role="group" aria-label={`${leg.label} 후보 경로`}>
+            {opts.length > 0 && <div className="nv-candidate-list" role="group" aria-label={`${leg.label} 후보 경로`}>
               {opts.map((opt, idx) => {
                 const isSelected = leg.isUserOrigin
                   ? (selectedUserOpt ? selectedUserOpt === opt.id : idx === 0)
                   : (savedTransit ? savedTransit.summary === opt.summary && savedTransit.minutes === opt.minutes : idx === 0);
 
-                return <article key={opt.id} className={`candidate-card ${isSelected ? 'selected' : ''}`}>
-                  <div className="candidate-top">
-                    <div>
-                      <span className="candidate-rank">후보 {idx + 1}</span>
-                      <strong className="candidate-time">{opt.minutes}분</strong>
-                      <span className="candidate-summary">{opt.summary}</span>
-                    </div>
-                    {!leg.isUserOrigin && !readonly && onApplyTransit ? (
-                      <button
-                        type="button"
-                        className={isSelected && savedTransit ? 'secondary small' : 'primary small'}
-                        onClick={() => onApplyTransit(leg.from.id, stripOption(opt))}
-                      >
-                        {isSelected && savedTransit ? <><Check size={14} /> 적용됨</> : '이 경로 선택'}
-                      </button>
-                    ) : leg.isUserOrigin ? (
-                      <button type="button" className="secondary small" onClick={() => setSelectedUserOpt(opt.id)}>
-                        {isSelected ? <><Check size={14} /> 선택됨</> : '후보 보기'}
-                      </button>
-                    ) : null}
-                  </div>
-
-                  <p className="candidate-submeta">
-                    환승 {opt.transfers}회 · 총 도보 {opt.walkMinutes}분{opt.fare ? ` · 카드 ${opt.fare.toLocaleString('ko-KR')}원` : ''}
-                  </p>
-
-                  {/* Visual Step Sequence: 도보 -> 버스/지하철 -> 도보 */}
-                  <div className="candidate-step-flow" aria-label="이동 순서">
-                    {opt.steps.map((s, sIdx) => <span key={`${opt.id}:chip:${sIdx}`} className="flow-item">
-                      {sIdx > 0 && <ArrowRight size={12} className="flow-arrow" />}
-                      <span className={`flow-chip mode-${s.mode}`}>
-                        {stepIcons[s.mode]} {s.route ? `${stepNames[s.mode]} ${s.route}` : stepNames[s.mode]} · {s.minutes}분
-                        {s.live && <em className="flow-live">{s.live}</em>}
-                      </span>
-                    </span>)}
-                  </div>
-
-                  {/* Step-by-step boarding/alighting details */}
-                  <ol className="candidate-step-details">
-                    {opt.steps.map((s, sIdx) => <li key={`${opt.id}:detail:${sIdx}`} className={`detail-row mode-${s.mode}`}>
-                      <span className="detail-tag">{s.route ? `${stepNames[s.mode]} ${s.route}` : stepNames[s.mode]}</span>
-                      <span className="detail-text">
-                        {s.from || s.to ? `${s.from || '출발'} → ${s.to || '도착'}` : '도보 이동'}
-                        <small>
-                          {s.minutes}분{s.stops ? ` (${s.stops}정류장)` : s.meters ? ` (${s.meters}m)` : ''}
-                          {s.live ? ` · 실시간: ${s.live}` : ''}
-                        </small>
-                      </span>
-                    </li>)}
-                  </ol>
-                </article>;
+                return (
+                  <TransitCandidateCard
+                    key={opt.id}
+                    option={opt}
+                    index={idx}
+                    selected={isSelected}
+                    actionLabel={leg.isUserOrigin ? (isSelected ? '선택됨' : '후보 보기') : (isSelected && savedTransit ? '적용됨' : '이 경로 선택')}
+                    onSelect={
+                      leg.isUserOrigin
+                        ? () => setSelectedUserOpt(opt.id)
+                        : !readonly && onApplyTransit
+                          ? () => onApplyTransit(leg.from.id, stripOption(opt))
+                          : undefined
+                    }
+                    onOpenArrivals={() => {
+                      if (!leg.isUserOrigin) setStopId(leg.from.id);
+                      const lng = leg.from.lng ?? 127;
+                      const lat = leg.from.lat ?? 37.5;
+                      setRegion((lng >= 126.76 && lng <= 127.19 && lat >= 37.42 && lat <= 37.70) ? 'seoul' : 'gyeonggi');
+                      setTab('station');
+                    }}
+                  />
+                );
               })}
             </div>}
 

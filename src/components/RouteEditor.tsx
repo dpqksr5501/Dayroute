@@ -1,8 +1,8 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowDown, ArrowUp, Check, Clock3, Coffee, Copy, ExternalLink, GripVertical, LocateFixed, MapPin,
-  Plus, Play, Share2, Trash2, Utensils, Trees, Palette, ShoppingBag, ChevronDown, CalendarDays, BusFront, Navigation, Pencil } from 'lucide-react';
-import { formatDuration, hasCoordinates, schedule, totalMinutes, transitFor, walkingFor, type Category, type Route, type Stop, type TransitLeg } from '../domain';
-import { reverseGeocodeParams, transportRequest } from '../transport';
+  Plus, Play, Share2, Trash2, Utensils, Trees, Palette, ShoppingBag, ChevronDown, CalendarDays, BusFront, Navigation, Pencil, RefreshCw } from 'lucide-react';
+import { formatDuration, hasCoordinates, makeStop, schedule, totalMinutes, transitFor, walkingFor, type Category, type Route, type Stop, type TransitLeg } from '../domain';
+import { kakaoDirections, naverDirections, reverseGeocodeParams, transitParams, transportRequest, type TransitOption, type TransitRouteResult } from '../transport';
 import type { UserLocation } from './MapView';
 import PlacePicker from './PlacePicker';
 import RouteCover from './RouteCover';
@@ -10,10 +10,17 @@ import CoverPhotoControl from './CoverPhotoControl';
 import MapPreviewCredit from './MapPreviewCredit';
 import TravelLeg from './TravelLeg';
 import BusPanel from './BusPanel';
+import TransitCandidateCard from './TransitCandidateCard';
 
 const MapView = lazy(() => import('./MapView'));
 const categoryIcons = { '식사': Utensils, '카페': Coffee, '산책': Trees, '문화': Palette, '쇼핑': ShoppingBag, '기타': MapPin };
 const categoryIcon = (category: Category, size = 19) => { const Icon = categoryIcons[category]; return <Icon size={size} />; };
+
+function stripOption(opt: TransitOption): TransitLeg {
+  const { key, summary, minutes, transfers, walkMinutes, fare, fetchedAt, steps, coordinates: coords } = opt;
+  return { key, summary, minutes, transfers, walkMinutes, ...(fare !== undefined ? { fare } : {}), fetchedAt, steps, coordinates: coords };
+}
+
 export default function RouteEditor({ route, onChange, onBack, onShare, onDuplicate, onDelete, readonly = false, onSaveCopy }: {
   route: Route; onChange: (r: Route) => boolean; onBack: () => void; onShare: () => void;
   onDuplicate: () => void; onDelete: () => void; readonly?: boolean; onSaveCopy?: () => void;
@@ -26,12 +33,23 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
   const [busStop, setBusStop] = useState<string | null>(null);
   const [userLocation, setUserLocation] = useState<UserLocation | null>(null), [locating, setLocating] = useState(false);
   const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 760px)').matches);
+
+  // Active leg tab below map: 'user-origin' or stop.id (for leg i -> i+1)
+  const [activeLegId, setActiveLegId] = useState<string>(() => route.stops[0]?.id || 'user-origin');
+  const [drawerOpen, setDrawerOpen] = useState(true);
+  const [mapLegOptions, setMapLegOptions] = useState<Record<string, TransitOption[]>>({});
+  const [mapLegBusy, setMapLegBusy] = useState<Record<string, boolean>>({});
+  const [mapLegError, setMapLegError] = useState<Record<string, string>>({});
+  const [selectedUserOptId, setSelectedUserOptId] = useState<string>('');
+
   const locateMe = () => {
     if (!navigator.geolocation || locating) return;
     setLocating(true);
     navigator.geolocation.getCurrentPosition(pos => {
       const lng = pos.coords.longitude, lat = pos.coords.latitude;
       setUserLocation({ lng, lat });
+      setActiveLegId('user-origin');
+      setDrawerOpen(true);
       setLocating(false);
       void transportRequest<{ address: string }>(reverseGeocodeParams(lng, lat), new AbortController().signal, 3600000)
         .then(r => { if (r.address) setUserLocation({ lng, lat, address: r.address }); }).catch(() => {});
@@ -45,6 +63,59 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
     const update = () => setNarrow(media.matches); media.addEventListener('change', update);
     return () => media.removeEventListener('change', update);
   }, []);
+
+  // Resolve active leg endpoints
+  const locatedStops = route.stops.filter(hasCoordinates);
+  const getActiveLegEndpoints = (legId: string): { id: string; label: string; from: Stop; to: Stop; isUserOrigin?: boolean } | null => {
+    if (legId === 'user-origin') {
+      if (!userLocation || !locatedStops[0]) return null;
+      return {
+        id: 'user-origin',
+        label: `내 위치 → 1. ${locatedStops[0].name || '첫 장소'}`,
+        from: makeStop({ id: 'user-origin', name: userLocation.address || '지금 내 위치', lng: userLocation.lng, lat: userLocation.lat, mode: 'transit' }),
+        to: locatedStops[0],
+        isUserOrigin: true,
+      };
+    }
+    const idx = route.stops.findIndex(s => s.id === legId);
+    if (idx >= 0 && idx < route.stops.length - 1) {
+      const a = route.stops[idx], b = route.stops[idx + 1];
+      if (hasCoordinates(a) && hasCoordinates(b)) {
+        return { id: a.id, label: `${idx + 1}. ${a.name || '장소'} → ${idx + 2}. ${b.name || '장소'}`, from: a, to: b };
+      }
+    }
+    if (route.stops.length >= 2 && hasCoordinates(route.stops[0]) && hasCoordinates(route.stops[1])) {
+      return { id: route.stops[0].id, label: `1. ${route.stops[0].name || '장소'} → 2. ${route.stops[1].name || '장소'}`, from: route.stops[0], to: route.stops[1] };
+    }
+    return null;
+  };
+
+  const activeLeg = getActiveLegEndpoints(activeLegId);
+
+  const fetchActiveLeg = async (leg: { id: string; from: Stop; to: Stop; isUserOrigin?: boolean }, signal?: AbortSignal) => {
+    setMapLegBusy(prev => ({ ...prev, [leg.id]: true }));
+    setMapLegError(prev => ({ ...prev, [leg.id]: '' }));
+    try {
+      const controller = new AbortController();
+      const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+      const data = await transportRequest<TransitRouteResult>(transitParams(leg.from, leg.to), combined, 60000);
+      if (combined.aborted) return;
+      setMapLegOptions(prev => ({ ...prev, [leg.id]: data.options }));
+      if (leg.isUserOrigin && data.options[0]) setSelectedUserOptId(data.options[0].id);
+    } catch (e) {
+      if (!signal?.aborted) setMapLegError(prev => ({ ...prev, [leg.id]: e instanceof Error ? e.message : '경로를 조회하지 못했어요.' }));
+    } finally {
+      if (!signal?.aborted) setMapLegBusy(prev => ({ ...prev, [leg.id]: false }));
+    }
+  };
+
+  useEffect(() => {
+    if (!activeLeg || !drawerOpen) return;
+    const controller = new AbortController();
+    void fetchActiveLeg(activeLeg, controller.signal);
+    return () => controller.abort();
+  }, [activeLeg?.id, activeLeg?.from.lng, activeLeg?.from.lat, activeLeg?.to.lng, activeLeg?.to.lat, drawerOpen]);
+
   const times = schedule(route), departures = schedule(route, true);
   const patch = (p: Partial<Route>) => onChange({ ...latestRoute.current, ...p, updatedAt: new Date().toISOString() });
   const patchStop = (id: string, p: Partial<Stop>) => patch({ stops: latestRoute.current.stops.map(s => s.id === id ? { ...s, ...p } : s) });
@@ -113,7 +184,7 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
                     <button className="text-button danger" onClick={() => { patch({ stops: route.stops.filter(s => s.id !== stop.id) }); if (picking === stop.id) setPicking(null); }}><Trash2 size={14} /> 삭제</button></div>
                 </div>}
               </article>
-              {i < route.stops.length - 1 && <TravelLeg from={stop} to={route.stops[i + 1]} region={route.region} readonly={readonly || preview} departure={departures[i]} onPatch={p => patchStop(stop.id, p)} onBus={() => setBusStop(stop.id)} />}
+              {i < route.stops.length - 1 && <TravelLeg from={stop} to={route.stops[i + 1]} region={route.region} readonly={readonly || preview} departure={departures[i]} onPatch={p => patchStop(stop.id, p)} onBus={() => { setActiveLegId(stop.id); setDrawerOpen(true); setBusStop(stop.id); }} />}
             </div>;
           })}</div>
           {!preview && <button className="add-stop" disabled={route.stops.length >= 100} onClick={() => setAdding(true)}><Plus size={19} /> {route.stops.length >= 100 ? '최대 100곳' : '장소 추가'}</button>}
@@ -134,7 +205,15 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
           }} />}
         </Suspense>
         {route.stops.length > 0 && <div className="map-leg-strip" aria-label="순서별 경로 바로가기">
-          <button type="button" className={`map-leg-chip ${userLocation ? 'active' : ''}`} onClick={() => { if (!userLocation) locateMe(); setBusStop(route.stops[0]?.id || ''); }}>
+          <button
+            type="button"
+            className={`map-leg-chip ${activeLeg?.id === 'user-origin' ? 'active' : ''}`}
+            onClick={() => {
+              if (!userLocation) locateMe();
+              setActiveLegId('user-origin');
+              setDrawerOpen(true);
+            }}
+          >
             <LocateFixed size={13} />
             <span>{userLocation ? `내 위치 → 1. ${route.stops[0]?.name || '첫 장소'}` : '지금 내 위치 출발'}</span>
           </button>
@@ -142,12 +221,93 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
             const next = route.stops[idx + 1];
             const tr = transitFor(s, next), wk = walkingFor(s, next);
             const sub = tr ? `${tr.minutes}분 · ${tr.summary}` : wk ? `도보 ${wk.minutes}분` : '후보 경로 보기';
-            return <button key={s.id} type="button" className="map-leg-chip" onClick={() => setBusStop(s.id)}>
+            return <button
+              key={s.id}
+              type="button"
+              className={`map-leg-chip ${activeLeg?.id === s.id ? 'active' : ''}`}
+              onClick={() => { setActiveLegId(s.id); setDrawerOpen(true); }}
+            >
               <strong>{idx + 1}→{idx + 2}</strong>
               <span>{s.name || '장소'} → {next.name || '장소'} <em>({sub})</em></span>
             </button>;
           })}
         </div>}
+
+        {/* Inline Naver Map-style Transit Candidate Drawer directly below Map (Image 2 + Image 3) */}
+        {route.stops.length > 0 && activeLeg && (
+          <section className="map-transit-drawer" aria-label="지도 하단 실시간 대중교통 후보">
+            <div className="map-drawer-head">
+              <div className="map-drawer-title">
+                <BusFront size={15} />
+                <strong>{activeLeg.label}</strong>
+              </div>
+              <div className="map-drawer-actions">
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label="경로 후보 새로고침"
+                  disabled={mapLegBusy[activeLeg.id]}
+                  onClick={() => void fetchActiveLeg(activeLeg)}
+                >
+                  <RefreshCw size={14} />
+                </button>
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => setDrawerOpen(!drawerOpen)}
+                >
+                  {drawerOpen ? '접기' : '후보 펼치기'} <ChevronDown size={14} className={drawerOpen ? 'rotate' : ''} />
+                </button>
+              </div>
+            </div>
+
+            {drawerOpen && (
+              <div className="map-drawer-body">
+                {mapLegBusy[activeLeg.id] && (
+                  <p className="transport-loading" role="status"><span className="spinner" /> 실시간 버스·지하철 후보를 불러오고 있어요…</p>
+                )}
+                {mapLegError[activeLeg.id] && (
+                  <p className="transport-error" role="status">{mapLegError[activeLeg.id]}</p>
+                )}
+                {(mapLegOptions[activeLeg.id] || []).length > 0 && (
+                  <div className="nv-candidate-list">
+                    {(mapLegOptions[activeLeg.id] || []).map((opt, idx) => {
+                      const savedTransit = !activeLeg.isUserOrigin ? transitFor(activeLeg.from, activeLeg.to) : undefined;
+                      const isSel = activeLeg.isUserOrigin
+                        ? (selectedUserOptId ? selectedUserOptId === opt.id : idx === 0)
+                        : (savedTransit ? savedTransit.summary === opt.summary && savedTransit.minutes === opt.minutes : idx === 0);
+                      return (
+                        <TransitCandidateCard
+                          key={opt.id}
+                          option={opt}
+                          index={idx}
+                          selected={isSel}
+                          actionLabel={activeLeg.isUserOrigin ? (isSel ? '선택됨' : '후보 선택') : (isSel && savedTransit ? '적용됨' : '이 경로 선택')}
+                          onSelect={
+                            activeLeg.isUserOrigin
+                              ? () => setSelectedUserOptId(opt.id)
+                              : !readonly && !preview
+                                ? () => applyTransit(activeLeg.from.id, stripOption(opt))
+                                : undefined
+                          }
+                          onOpenArrivals={() => setBusStop(activeLeg.isUserOrigin ? (route.stops[0]?.id || '') : activeLeg.from.id)}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+                <div className="map-drawer-foot">
+                  <span>{activeLeg.from.name || '출발'} → {activeLeg.to.name || '도착'}</span>
+                  <div className="external-map-links">
+                    <a href={naverDirections(activeLeg.from, activeLeg.to)} target="_blank" rel="noreferrer">네이버 지도 <ExternalLink size={12} /></a>
+                    <a href={kakaoDirections(activeLeg.from, activeLeg.to)} target="_blank" rel="noreferrer">카카오맵 <ExternalLink size={12} /></a>
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
         <div className="map-tour-control"><div><h3>{current?.name || route.title}</h3><p>{current ? `${times[route.stops.indexOf(current)]} 도착 · ${current.duration}분 머물기` : `${route.stops.length}곳 · ${route.startTime} 출발`}</p></div>
           <div className="map-bottom-actions"><button className="secondary map-bus-btn" aria-label="실시간 경로 및 버스 후보 열기" onClick={() => setBusStop(selected || route.stops[0]?.id || '')}><BusFront size={16} /> 경로·버스</button><button className="primary" disabled={!route.stops.some(hasCoordinates)} onClick={() => setTour(!tour)}><Play size={16} fill="currentColor" />{tour ? '멈추기' : '둘러보기'}</button></div></div>
       </aside>
