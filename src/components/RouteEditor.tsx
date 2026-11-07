@@ -91,6 +91,13 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
   };
 
   const activeLeg = getActiveLegEndpoints(activeLegId);
+  const activeOptions = activeLeg ? (mapLegOptions[activeLeg.id] || []) : [];
+  const activeSavedTransit = activeLeg && !activeLeg.isUserOrigin ? transitFor(activeLeg.from, activeLeg.to) : undefined;
+  const previewTransit: TransitLeg | null = activeLeg
+    ? (activeLeg.isUserOrigin
+      ? (activeOptions.find(o => o.id === selectedUserOptId) || activeOptions[0] || null)
+      : (activeSavedTransit || activeOptions[0] || null))
+    : null;
 
   const fetchActiveLeg = async (leg: { id: string; from: Stop; to: Stop; isUserOrigin?: boolean }, signal?: AbortSignal) => {
     setMapLegBusy(prev => ({ ...prev, [leg.id]: true }));
@@ -192,7 +199,7 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
       </section>
       <aside className={`map-pane ${mobileMap ? 'mobile-visible' : ''}`}>
         <Suspense fallback={<div className="map-placeholder"><span className="spinner" /> 지도를 준비하고 있어요</div>}>
-          {(!narrow || mobileMap) && <MapView stops={route.stops} selectedId={selected} userLocation={userLocation} locating={locating} onLocate={locateMe} onSelect={id => { setTour(false); setSelected(id); }} onInteract={() => setTour(false)} onOverview={() => { setSelected(null); setTour(false); }} picking={!!picking} tour={preview} onPick={(lng, lat) => {
+          {(!narrow || mobileMap) && <MapView stops={route.stops} selectedId={selected} userLocation={userLocation} locating={locating} onLocate={locateMe} previewTransit={previewTransit} onSelect={id => { setTour(false); setSelected(id); }} onInteract={() => setTour(false)} onOverview={() => { setSelected(null); setTour(false); }} picking={!!picking} tour={preview} onPick={(lng, lat) => {
             if (picking && !readonly) {
               const targetId = picking, currentStop = latestRoute.current.stops.find(s => s.id === targetId);
               patchStop(targetId, { lng, lat });

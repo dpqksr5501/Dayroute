@@ -2,23 +2,41 @@ import { useEffect, useRef, useState } from 'react';
 import type { GeoJSONSource } from 'maplibre-gl';
 import maplibregl from '../mapRuntime';
 import { Box, Crosshair, LocateFixed, RotateCcw } from 'lucide-react';
-import { carFor, hasCoordinates, transitFor, walkingFor, type Stop } from '../domain';
+import { carFor, hasCoordinates, transitFor, walkingFor, type Stop, type TransitLeg } from '../domain';
 import { mapPreviewPlan } from '../mapPreviewPlan';
 
 export interface UserLocation { lng: number; lat: number; address?: string }
-interface Props { stops: Stop[]; selectedId: string | null; onSelect: (id: string) => void;
-  userLocation?: UserLocation | null; onLocate?: () => void; locating?: boolean;
-  picking?: boolean; onPick?: (lng: number, lat: number) => void; tour?: boolean; onInteract?: () => void; onOverview?: () => void }
-export default function MapView({ stops, selectedId, onSelect, userLocation, onLocate, locating, picking, onPick, tour, onInteract, onOverview }: Props) {
+interface Props {
+  stops: Stop[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  userLocation?: UserLocation | null;
+  onLocate?: () => void;
+  locating?: boolean;
+  previewTransit?: TransitLeg | null;
+  picking?: boolean;
+  onPick?: (lng: number, lat: number) => void;
+  tour?: boolean;
+  onInteract?: () => void;
+  onOverview?: () => void;
+}
+
+export default function MapView({
+  stops, selectedId, onSelect, userLocation, onLocate, locating, previewTransit,
+  picking, onPick, tour, onInteract, onOverview,
+}: Props) {
   const container = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
   const markers = useRef<maplibregl.Marker[]>([]);
+  const stepMarkers = useRef<maplibregl.Marker[]>([]);
   const userMarker = useRef<maplibregl.Marker | null>(null);
-  const latest = useRef({ stops, picking, onPick, onSelect, onInteract, onOverview }); latest.current = { stops, picking, onPick, onSelect, onInteract, onOverview };
+  const latest = useRef({ stops, picking, onPick, onSelect, onInteract, onOverview });
+  latest.current = { stops, picking, onPick, onSelect, onInteract, onOverview };
   const overview = useRef(true), framed = useRef(false), flatFocus = useRef(false);
   const [ready, setReady] = useState(false), [error, setError] = useState('');
   const [bearing, setBearing] = useState(0), [in3D, setIn3D] = useState(false);
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
   const fit = () => {
     const bounds = mapPreviewPlan(stops).bounds;
     if (!map.current || !bounds) return;
@@ -76,8 +94,11 @@ export default function MapView({ stops, selectedId, onSelect, userLocation, onL
             'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
           } }, label);
         instance.addSource('dayroute-path', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+        instance.addSource('dayroute-active-transit', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+
+        // Base itinerary dashed & solid lines
         instance.addLayer({ id: 'dayroute-path-line', type: 'line', source: 'dayroute-path', paint: {
-          'line-color': '#52725a', 'line-width': 3, 'line-dasharray': [2, 2], 'line-opacity': 0.85,
+          'line-color': '#52725a', 'line-width': 3, 'line-dasharray': [2, 2], 'line-opacity': 0.72,
         }, filter: ['all', ['==', ['geometry-type'], 'LineString'], ['!=', ['get', 'road'], true], ['!=', ['get', 'transit'], true]] });
         instance.addLayer({ id: 'dayroute-road-casing', type: 'line', source: 'dayroute-path', filter: ['==', ['get', 'road'], true],
           layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ffffff', 'line-width': 8, 'line-opacity': 0.85 } });
@@ -87,8 +108,43 @@ export default function MapView({ stops, selectedId, onSelect, userLocation, onL
           layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ffffff', 'line-width': 8, 'line-opacity': 0.85 } });
         instance.addLayer({ id: 'dayroute-transit-line', type: 'line', source: 'dayroute-path', filter: ['==', ['get', 'transit'], true],
           layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#2b5b84', 'line-width': 5, 'line-opacity': 0.94 } });
-        instance.addLayer({ id: 'dayroute-transit-nodes', type: 'circle', source: 'dayroute-path', filter: ['==', ['get', 'transitNode'], true],
-          paint: { 'circle-radius': 4.5, 'circle-color': '#ffffff', 'circle-stroke-color': '#2b5b84', 'circle-stroke-width': 2.2 } });
+
+        // Active / Preview Candidate Multi-Modal Lines (Naver Map style: Walk dotted blue, Bus bright lime-green, Subway vivid yellow/blue)
+        instance.addLayer({
+          id: 'active-transit-casing', type: 'line', source: 'dayroute-active-transit',
+          filter: ['==', ['geometry-type'], 'LineString'],
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': '#ffffff', 'line-width': 10, 'line-opacity': 0.95 },
+        });
+        instance.addLayer({
+          id: 'active-transit-walk', type: 'line', source: 'dayroute-active-transit',
+          filter: ['all', ['==', ['geometry-type'], 'LineString'], ['==', ['get', 'stepMode'], 'walk']],
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': '#3b82f6', 'line-width': 5.5, 'line-dasharray': [0.8, 1.8], 'line-opacity': 0.98 },
+        });
+        instance.addLayer({
+          id: 'active-transit-bus', type: 'line', source: 'dayroute-active-transit',
+          filter: ['all', ['==', ['geometry-type'], 'LineString'], ['==', ['get', 'stepMode'], 'bus']],
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': '#52b714', 'line-width': 6.5, 'line-opacity': 0.98 },
+        });
+        instance.addLayer({
+          id: 'active-transit-subway', type: 'line', source: 'dayroute-active-transit',
+          filter: ['all', ['==', ['geometry-type'], 'LineString'], ['in', ['get', 'stepMode'], ['literal', ['subway', 'train']]]],
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': '#f59e0b', 'line-width': 6.5, 'line-opacity': 0.98 },
+        });
+        instance.addLayer({
+          id: 'active-transit-nodes', type: 'circle', source: 'dayroute-active-transit',
+          filter: ['==', ['geometry-type'], 'Point'],
+          paint: {
+            'circle-radius': 6,
+            'circle-color': '#ffffff',
+            'circle-stroke-color': ['match', ['get', 'stepMode'], 'bus', '#40960d', 'subway', '#d97706', '#2563eb'],
+            'circle-stroke-width': 3,
+          },
+        });
+
         setReady(true); setError('');
       });
       instance.on('click', e => { if (latest.current.picking) latest.current.onPick?.(e.lngLat.lng, e.lngLat.lat); });
@@ -105,8 +161,15 @@ export default function MapView({ stops, selectedId, onSelect, userLocation, onL
       }
     }); observer.observe(container.current);
     const timeout = window.setTimeout(() => { if (!instance.isStyleLoaded()) setError('지도를 불러오는 데 시간이 걸리고 있어요. 인터넷 연결을 확인해 주세요.'); }, 15000);
-    return () => { clearTimeout(timeout); observer.disconnect(); userMarker.current?.remove(); markers.current.forEach(m => m.remove()); instance.remove(); map.current = null; };
+    return () => {
+      clearTimeout(timeout); observer.disconnect();
+      userMarker.current?.remove();
+      stepMarkers.current.forEach(m => m.remove());
+      markers.current.forEach(m => m.remove());
+      instance.remove(); map.current = null;
+    };
   }, []);
+
   useEffect(() => {
     const instance = map.current;
     if (!ready || !instance) return;
@@ -118,10 +181,9 @@ export default function MapView({ stops, selectedId, onSelect, userLocation, onL
       el.title = userLocation.address ? `내 위치 · ${userLocation.address}` : '지금 내 위치';
       el.setAttribute('aria-label', '지금 내 위치');
       userMarker.current = new maplibregl.Marker({ element: el }).setLngLat([userLocation.lng, userLocation.lat]).addTo(instance);
-      overview.current = false;
-      instance.flyTo({ center: [userLocation.lng, userLocation.lat], zoom: Math.max(instance.getZoom(), 14.8), duration: reduced ? 0 : 1000 });
     }
   }, [ready, userLocation?.lng, userLocation?.lat]);
+
   useEffect(() => {
     const instance = map.current;
     if (!ready || !instance) return;
@@ -139,15 +201,92 @@ export default function MapView({ stops, selectedId, onSelect, userLocation, onL
       const walk = walkingFor(s, next) ?? carFor(s, next), transit = transitFor(s, next);
       const road = !!walk?.coordinates.length, transitRoad = !!transit?.coordinates.length;
       const coordinates = road ? walk!.coordinates : transitRoad ? transit!.coordinates : [[s.lng, s.lat], [next.lng, next.lat]];
-      const lineFeature = { type: 'Feature' as const, properties: { road, transit: transitRoad }, geometry: { type: 'LineString' as const, coordinates } };
-      const nodeFeatures = (transit?.steps || [])
-        .filter(step => step.mode !== 'walk' && typeof step.fromLng === 'number' && typeof step.fromLat === 'number')
-        .map(step => ({ type: 'Feature' as const, properties: { transitNode: true }, geometry: { type: 'Point' as const, coordinates: [step.fromLng!, step.fromLat!] } }));
-      return [lineFeature, ...nodeFeatures];
+      return [{ type: 'Feature' as const, properties: { road, transit: transitRoad }, geometry: { type: 'LineString' as const, coordinates } }];
     });
     (instance.getSource('dayroute-path') as GeoJSONSource)?.setData({ type: 'FeatureCollection', features });
   }, [ready, stops, selectedId]);
-  useEffect(() => { if (ready) fit(); }, [ready, stops.map(s => `${s.id}:${s.lng}:${s.lat}`).join('|')]);
+
+  // Render active / selected transit candidate steps on the map with Naver-style callout bubbles
+  useEffect(() => {
+    const instance = map.current;
+    if (!ready || !instance) return;
+    stepMarkers.current.forEach(m => m.remove());
+    stepMarkers.current = [];
+    const src = instance.getSource('dayroute-active-transit') as GeoJSONSource | undefined;
+    if (!src) return;
+    if (!previewTransit) {
+      src.setData({ type: 'FeatureCollection', features: [] });
+      return;
+    }
+
+    const features: { type: 'Feature'; properties: Record<string, unknown>; geometry: { type: 'LineString'; coordinates: [number, number][] } | { type: 'Point'; coordinates: [number, number] } }[] = [];
+    const allPts: [number, number][] = [];
+
+    for (const s of previewTransit.steps) {
+      const coords = s.coordinates && s.coordinates.length >= 2
+        ? s.coordinates
+        : (typeof s.fromLng === 'number' && typeof s.fromLat === 'number' && typeof s.toLng === 'number' && typeof s.toLat === 'number')
+          ? [[s.fromLng, s.fromLat] as [number, number], [s.toLng, s.toLat] as [number, number]]
+          : [];
+      if (coords.length >= 2) {
+        features.push({
+          type: 'Feature',
+          properties: { stepMode: s.mode, route: s.route || '' },
+          geometry: { type: 'LineString', coordinates: coords },
+        });
+        for (const pt of coords) allPts.push(pt);
+      }
+      if (s.mode !== 'walk' && typeof s.fromLng === 'number' && typeof s.fromLat === 'number') {
+        features.push({
+          type: 'Feature',
+          properties: { stepMode: s.mode },
+          geometry: { type: 'Point', coordinates: [s.fromLng, s.fromLat] },
+        });
+        const pill = document.createElement('div');
+        pill.className = `map-step-callout mode-${s.mode}`;
+        const icon = s.mode === 'subway' ? '🚇' : '🚌';
+        const label = s.route ? `${s.route}${s.from ? ` (${s.from})` : ''}` : (s.from || '승차');
+        pill.textContent = `${icon} ${label}`;
+        stepMarkers.current.push(
+          new maplibregl.Marker({ element: pill, anchor: 'bottom', offset: [0, -8] })
+            .setLngLat([s.fromLng, s.fromLat])
+            .addTo(instance)
+        );
+      }
+    }
+
+    // Fallback to overall coordinates if individual steps lacked coordinates
+    if (features.length === 0 && previewTransit.coordinates.length >= 2) {
+      features.push({
+        type: 'Feature',
+        properties: { stepMode: 'bus' },
+        geometry: { type: 'LineString', coordinates: previewTransit.coordinates },
+      });
+      for (const pt of previewTransit.coordinates) allPts.push(pt);
+    }
+
+    src.setData({ type: 'FeatureCollection', features });
+
+    if (allPts.length >= 2) {
+      let minLng = Infinity, maxLng = -Infinity, minLat = Infinity, maxLat = -Infinity;
+      for (const [x, y] of allPts) {
+        if (x < minLng) minLng = x;
+        if (x > maxLng) maxLng = x;
+        if (y < minLat) minLat = y;
+        if (y > maxLat) maxLat = y;
+      }
+      if (Number.isFinite(minLng) && Number.isFinite(maxLng) && (maxLng - minLng > 0.0002 || maxLat - minLat > 0.0002)) {
+        overview.current = false;
+        instance.fitBounds([[minLng, minLat], [maxLng, maxLat]], {
+          padding: { top: 68, right: 54, bottom: 54, left: 54 },
+          maxZoom: 15.6,
+          duration: reduced ? 0 : 850,
+        });
+      }
+    }
+  }, [ready, previewTransit?.key, previewTransit?.summary, previewTransit?.minutes]);
+
+  useEffect(() => { if (ready && !previewTransit) fit(); }, [ready, stops.map(s => `${s.id}:${s.lng}:${s.lat}`).join('|')]);
   useEffect(() => {
     const selected = stops.find(s => s.id === selectedId);
     if (ready && map.current && selected && hasCoordinates(selected)) {
@@ -157,8 +296,6 @@ export default function MapView({ stops, selectedId, onSelect, userLocation, onL
     }
   }, [ready, selectedId]);
   useEffect(() => { if (map.current) map.current.getCanvas().style.cursor = picking ? 'crosshair' : ''; }, [ready, picking]);
-  const hasWalkRoad = stops.some((s, i) => (walkingFor(s, stops[i + 1]) ?? carFor(s, stops[i + 1]))?.coordinates.length);
-  const hasTransitRoad = stops.some((s, i) => transitFor(s, stops[i + 1])?.coordinates.length);
   return <div className={`map-shell ${tour ? 'tour-map' : ''}`}>
     <div ref={container} className="map-canvas" aria-label="코스 지도" />
     <div className="map-actions">
@@ -169,7 +306,7 @@ export default function MapView({ stops, selectedId, onSelect, userLocation, onL
         <svg width="20" height="24" viewBox="0 0 20 24" aria-hidden="true"><text x="10" y="6" textAnchor="middle" fontSize="7" fill="currentColor">N</text><g transform={`rotate(${-bearing} 10 15)`}><path d="M10 8 14 16 10 14Z" fill="#a65f51" /><path d="M10 8 6 16 10 14Z" fill="#ce8c7e" /><path d="M10 22 6 14 10 16Z" fill="#9aa697" /><path d="M10 22 14 14 10 16Z" fill="#71836d" /></g></svg>
       </button>
     </div>
-    {stops.length > 1 && <div className="map-route-key">점선 · 장소 연결{hasWalkRoad ? ' / 초록 실선 · 도로' : ''}{hasTransitRoad ? ' / 파란 실선 · 대중교통' : ''}</div>}
+    <div className="map-route-key">파란 점선 · 도보 / 초록 실선 · 버스 / 노란 실선 · 지하철</div>
     {picking && <div className="map-pick-message"><Crosshair size={17} /> 지도를 눌러 장소의 위치를 지정하세요</div>}
     {error && <div className="map-error" role="status">{error}</div>}
     {!ready && !error && <div className="map-loading"><span className="spinner" /> 지도를 펼치고 있어요</div>}

@@ -18,9 +18,10 @@ export interface WalkingLeg {
 export interface TransitStep {
   mode: TransitStepMode; minutes: number; meters?: number;
   route?: string; from?: string; to?: string; stationId?: string;
-  fromLng?: number; fromLat?: number; stops?: number;
+  fromLng?: number; fromLat?: number; toLng?: number; toLat?: number; stops?: number;
   live?: string; live2?: string; stopsAway?: number; stopsAway2?: number;
   busType?: string; altRoutes?: string[];
+  coordinates?: [number, number][];
 }
 export interface TransitLeg {
   key: string; summary: string; minutes: number; transfers: number;
@@ -135,11 +136,13 @@ export function validTransitStep(v: unknown): v is TransitStep {
     && (v.route === undefined || str(v.route, 80)) && (v.from === undefined || str(v.from, 100))
     && (v.to === undefined || str(v.to, 100)) && (v.stationId === undefined || str(v.stationId, 50))
     && (v.fromLng === undefined || num(v.fromLng, -180, 180)) && (v.fromLat === undefined || num(v.fromLat, -85, 85))
+    && (v.toLng === undefined || num(v.toLng, -180, 180)) && (v.toLat === undefined || num(v.toLat, -85, 85))
     && (v.stops === undefined || (num(v.stops, 0, 300) && Number.isInteger(v.stops)))
     && (v.live === undefined || str(v.live, 80)) && (v.live2 === undefined || str(v.live2, 80))
     && (v.stopsAway === undefined || num(v.stopsAway, 0, 300)) && (v.stopsAway2 === undefined || num(v.stopsAway2, 0, 300))
     && (v.busType === undefined || str(v.busType, 30))
-    && (v.altRoutes === undefined || (Array.isArray(v.altRoutes) && v.altRoutes.length <= 10 && v.altRoutes.every(r => str(r, 40))));
+    && (v.altRoutes === undefined || (Array.isArray(v.altRoutes) && v.altRoutes.length <= 10 && v.altRoutes.every(r => str(r, 40))))
+    && (v.coordinates === undefined || (Array.isArray(v.coordinates) && v.coordinates.length <= 4000 && v.coordinates.every(p => Array.isArray(p) && p.length === 2 && num(p[0], -180, 180) && num(p[1], -85, 85))));
 }
 export function validTransit(v: unknown): v is TransitLeg {
   return obj(v) && str(v.key, 150) && str(v.summary, 160)

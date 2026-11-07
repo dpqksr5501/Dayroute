@@ -5,7 +5,7 @@ export class TransportError extends Error {
   code: TransportCode;
   constructor(code: TransportCode, message: string) { super(message); this.code = code; }
 }
-export interface BusStation { id: string; name: string; region: 'seoul' | 'gyeonggi'; number?: string; distance?: number }
+export interface BusStation { id: string; name: string; region: 'seoul' | 'gyeonggi'; number?: string; distance?: number; lng?: number; lat?: number }
 export interface BusArrival { route: string; direction: string; first: string; second: string; stopsAway?: number }
 export interface BusResult { arrivals: BusArrival[]; fetchedAt: string; providerTime?: string; source: string }
 export interface PoiItem { id: string; name: string; address: string; category: Category; lng: number; lat: number }
