@@ -1,8 +1,8 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowDown, ArrowUp, Check, Clock3, Coffee, Copy, ExternalLink, GripVertical, LocateFixed, MapPin,
   Plus, Play, Share2, Trash2, Utensils, Trees, Palette, ShoppingBag, ChevronDown, CalendarDays, BusFront, Navigation, Pencil, RefreshCw } from 'lucide-react';
-import { formatDuration, hasCoordinates, makeStop, schedule, totalMinutes, transitFor, walkingFor, type Category, type Route, type Stop, type TransitLeg } from '../domain';
-import { kakaoDirections, naverDirections, reverseGeocodeParams, transitParams, transportRequest, type TransitOption, type TransitRouteResult } from '../transport';
+import { formatDuration, hasCoordinates, makeStop, schedule, totalMinutes, transitFor, walkingFor, walkingKey, type Category, type Route, type Stop, type TransitLeg } from '../domain';
+import { carParams, kakaoDirections, naverDirections, reverseGeocodeParams, transitParams, transportRequest, walkingParams, type TransitOption, type TransitRouteResult, type WalkingResult } from '../transport';
 import type { UserLocation } from './MapView';
 import PlacePicker from './PlacePicker';
 import RouteCover from './RouteCover';
@@ -41,6 +41,7 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
   const [mapLegBusy, setMapLegBusy] = useState<Record<string, boolean>>({});
   const [mapLegError, setMapLegError] = useState<Record<string, string>>({});
   const [selectedUserOptId, setSelectedUserOptId] = useState<string>('');
+  const [autoWalkCoords, setAutoWalkCoords] = useState<Record<string, [number, number][]>>({});
 
   const locateMe = () => {
     if (!navigator.geolocation || locating) return;
@@ -123,6 +124,27 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
     return () => controller.abort();
   }, [activeLeg?.id, activeLeg?.from.lng, activeLeg?.from.lat, activeLeg?.to.lng, activeLeg?.to.lat, drawerOpen]);
 
+  // Automatically fetch real TMAP road/pedestrian geometry for all stop-to-stop legs so map never shows straight lines
+  useEffect(() => {
+    const controller = new AbortController();
+    for (let i = 0; i < route.stops.length - 1; i++) {
+      const a = route.stops[i], b = route.stops[i + 1];
+      if (!hasCoordinates(a) || !hasCoordinates(b)) continue;
+      const wKey = walkingKey(a, b);
+      if (autoWalkCoords[wKey] || walkingFor(a, b)?.coordinates.length || transitFor(a, b)?.coordinates.length) continue;
+      const dist = Math.hypot(b.lng - a.lng, b.lat - a.lat);
+      const params = dist <= 0.045 ? walkingParams(a, b) : carParams(a, b);
+      void transportRequest<WalkingResult>(params, controller.signal, 3600000)
+        .then(res => {
+          if (!controller.signal.aborted && res.coordinates.length >= 2) {
+            setAutoWalkCoords(prev => ({ ...prev, [wKey]: res.coordinates }));
+          }
+        })
+        .catch(() => {});
+    }
+    return () => controller.abort();
+  }, [route.stops.map(s => `${s.id}:${s.lng}:${s.lat}`).join('|')]);
+
   const times = schedule(route), departures = schedule(route, true);
   const patch = (p: Partial<Route>) => onChange({ ...latestRoute.current, ...p, updatedAt: new Date().toISOString() });
   const patchStop = (id: string, p: Partial<Stop>) => patch({ stops: latestRoute.current.stops.map(s => s.id === id ? { ...s, ...p } : s) });
@@ -199,7 +221,7 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
       </section>
       <aside className={`map-pane ${mobileMap ? 'mobile-visible' : ''}`}>
         <Suspense fallback={<div className="map-placeholder"><span className="spinner" /> 지도를 준비하고 있어요</div>}>
-          {(!narrow || mobileMap) && <MapView stops={route.stops} selectedId={selected} userLocation={userLocation} locating={locating} onLocate={locateMe} previewTransit={previewTransit} onSelect={id => { setTour(false); setSelected(id); }} onInteract={() => setTour(false)} onOverview={() => { setSelected(null); setTour(false); }} picking={!!picking} tour={preview} onPick={(lng, lat) => {
+          {(!narrow || mobileMap) && <MapView stops={route.stops} selectedId={selected} userLocation={userLocation} locating={locating} onLocate={locateMe} previewTransit={previewTransit} autoWalkCoords={autoWalkCoords} onSelect={id => { setTour(false); setSelected(id); }} onInteract={() => setTour(false)} onOverview={() => { setSelected(null); setTour(false); }} picking={!!picking} tour={preview} onPick={(lng, lat) => {
             if (picking && !readonly) {
               const targetId = picking, currentStop = latestRoute.current.stops.find(s => s.id === targetId);
               patchStop(targetId, { lng, lat });

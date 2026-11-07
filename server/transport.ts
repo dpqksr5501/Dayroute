@@ -416,14 +416,48 @@ function slicePathBetween(coords: [number, number][], p1: [number, number], p2: 
   const sub = idx1 <= idx2 ? coords.slice(idx1, idx2 + 1) : coords.slice(idx2, idx1 + 1).reverse();
   return [p1, ...sub.slice(0, 600), p2];
 }
-function attachStepGeometry(steps: TransitStep[], coords: [number, number][], mapAllowed: boolean): TransitStep[] {
+function attachStepGeometry(
+  steps: TransitStep[],
+  coords: [number, number][],
+  mapAllowed: boolean,
+  walkGeometryMap?: Map<string, [number, number][]>,
+): TransitStep[] {
   if (!mapAllowed) return steps;
   return steps.map(s => {
     if (typeof s.fromLng !== 'number' || typeof s.fromLat !== 'number' || typeof s.toLng !== 'number' || typeof s.toLat !== 'number') return s;
     const p1: [number, number] = [s.fromLng, s.fromLat], p2: [number, number] = [s.toLng, s.toLat];
-    const segCoords = s.mode === 'walk' ? [p1, p2] : slicePathBetween(coords, p1, p2);
-    return { ...s, coordinates: segCoords };
+    if (s.mode === 'walk') {
+      const wKey = `${p1[0].toFixed(4)},${p1[1].toFixed(4)}>${p2[0].toFixed(4)},${p2[1].toFixed(4)}`;
+      const realWalk = walkGeometryMap?.get(wKey);
+      const sliced = slicePathBetween(coords, p1, p2);
+      const segCoords = (realWalk && realWalk.length >= 2) ? realWalk : (sliced.length >= 3 ? sliced : [p1, p2]);
+      return { ...s, coordinates: segCoords };
+    }
+    return { ...s, coordinates: slicePathBetween(coords, p1, p2) };
   });
+}
+async function fetchPedestrianCoords(
+  x1: number, y1: number, x2: number, y2: number,
+  env: Env, fetcher: typeof fetch,
+): Promise<[number, number][]> {
+  if (!env.TMAP_APP_KEY || env.TMAP_FREE_PLAN_CONFIRMED !== 'true') return [[x1, y1], [x2, y2]];
+  const dist = haversineMeters(x1, y1, x2, y2);
+  if (dist < 25 || dist > 5000) return [[x1, y1], [x2, y2]];
+  const cKey = `ped:${x1.toFixed(4)},${y1.toFixed(4)}>${x2.toFixed(4)},${y2.toFixed(4)}`;
+  const hit = cache.get(cKey);
+  if (hit && hit.until > Date.now()) return hit.data as [number, number][];
+  try {
+    const b = await json('https://apis.openapi.sk.com/tmap/routes/pedestrian?version=1', {
+      method: 'POST', headers: { appKey: env.TMAP_APP_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startX: x1, startY: y1, endX: x2, endY: y2, startName: '출발', endName: '도착', reqCoordType: 'WGS84GEO', resCoordType: 'WGS84GEO' }),
+    }, fetcher);
+    const parsed = parseTmap(b, cKey, true);
+    if (parsed.coordinates.length >= 2) {
+      cache.set(cKey, { until: Date.now() + 3600000, data: parsed.coordinates });
+      return parsed.coordinates as [number, number][];
+    }
+  } catch {}
+  return [[x1, y1], [x2, y2]];
 }
 async function buildSmartTransitOptions(
   lng: number, lat: number, toLng: number, toLat: number,
@@ -507,6 +541,30 @@ async function buildSmartTransitOptions(
     ? [nearDestSub.lng, nearDestSub.lat]
     : midCoord;
 
+  // Fetch real TMAP pedestrian sidewalk paths for boarding & alighting walk segments
+  const walkGeometryMap = new Map<string, [number, number][]>();
+  if (mapAllowed && env.TMAP_APP_KEY) {
+    const walkPairs: [number, number, number, number][] = [];
+    for (const st of topOriginStations) {
+      if (st.lng && st.lat) walkPairs.push([lng, lat, st.lng, st.lat]);
+    }
+    if (nearOriginSub && nearOriginSub.dist <= 2200) {
+      walkPairs.push([lng, lat, nearOriginSub.lng, nearOriginSub.lat]);
+    }
+    if (destStations[0]?.lng && destStations[0]?.lat) {
+      walkPairs.push([destStations[0].lng, destStations[0].lat, toLng, toLat]);
+    }
+    if (nearDestSub && nearDestSub.dist <= 2200) {
+      walkPairs.push([nearDestSub.lng, nearDestSub.lat, toLng, toLat]);
+    }
+    await Promise.all(walkPairs.map(async ([x1, y1, x2, y2]) => {
+      const wKey = `${x1.toFixed(4)},${y1.toFixed(4)}>${x2.toFixed(4)},${y2.toFixed(4)}`;
+      if (walkGeometryMap.has(wKey)) return;
+      const wCoords = await fetchPedestrianCoords(x1, y1, x2, y2, env, fetcher);
+      walkGeometryMap.set(wKey, wCoords);
+    }));
+  }
+
   const destActiveBuses = (destArrivals[0]?.arrivals || []).filter(a => a.route && !a.first.includes('종료') && !a.first.includes('없음'));
   const destBusRoutes = (destActiveBuses.length ? destActiveBuses : (destArrivals[0]?.arrivals || [])).map(a => a.route).filter(Boolean);
 
@@ -560,7 +618,7 @@ async function buildSmartTransitOptions(
           },
           { mode: 'walk', minutes: destWalk1, meters: Math.round(destStations[0]?.distance ?? 160), from: nearDestSub.name, to: destSt1, fromLng: nearDestSub.lng, fromLat: nearDestSub.lat, toLng: toLng, toLat: toLat },
         ];
-        const steps = attachStepGeometry(rawSteps, coords, mapAllowed);
+        const steps = attachStepGeometry(rawSteps, coords, mapAllowed, walkGeometryMap);
         const opt: TransitOption = {
           id: `smart-combo-${options.length + 1}`, key,
           summary: `${bus.route} → ${nearOriginSub.line}`,

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { GeoJSONSource } from 'maplibre-gl';
 import maplibregl from '../mapRuntime';
 import { Box, Crosshair, LocateFixed, RotateCcw } from 'lucide-react';
-import { carFor, hasCoordinates, transitFor, walkingFor, type Stop, type TransitLeg } from '../domain';
+import { carFor, hasCoordinates, transitFor, walkingFor, walkingKey, type Stop, type TransitLeg } from '../domain';
 import { mapPreviewPlan } from '../mapPreviewPlan';
 
 export interface UserLocation { lng: number; lat: number; address?: string }
@@ -14,6 +14,7 @@ interface Props {
   onLocate?: () => void;
   locating?: boolean;
   previewTransit?: TransitLeg | null;
+  autoWalkCoords?: Record<string, [number, number][]>;
   picking?: boolean;
   onPick?: (lng: number, lat: number) => void;
   tour?: boolean;
@@ -22,7 +23,7 @@ interface Props {
 }
 
 export default function MapView({
-  stops, selectedId, onSelect, userLocation, onLocate, locating, previewTransit,
+  stops, selectedId, onSelect, userLocation, onLocate, locating, previewTransit, autoWalkCoords,
   picking, onPick, tour, onInteract, onOverview,
 }: Props) {
   const container = useRef<HTMLDivElement>(null);
@@ -199,12 +200,13 @@ export default function MapView({
       const next = stops[i + 1];
       if (!next || !hasCoordinates(s) || !hasCoordinates(next)) return [];
       const walk = walkingFor(s, next) ?? carFor(s, next), transit = transitFor(s, next);
-      const road = !!walk?.coordinates.length, transitRoad = !!transit?.coordinates.length;
-      const coordinates = road ? walk!.coordinates : transitRoad ? transit!.coordinates : [[s.lng, s.lat], [next.lng, next.lat]];
+      const autoWalk = autoWalkCoords?.[walkingKey(s, next)];
+      const road = !!(walk?.coordinates.length || autoWalk?.length), transitRoad = !!transit?.coordinates.length;
+      const coordinates = walk?.coordinates.length ? walk.coordinates : transitRoad ? transit!.coordinates : autoWalk?.length ? autoWalk : [[s.lng, s.lat], [next.lng, next.lat]];
       return [{ type: 'Feature' as const, properties: { road, transit: transitRoad }, geometry: { type: 'LineString' as const, coordinates } }];
     });
     (instance.getSource('dayroute-path') as GeoJSONSource)?.setData({ type: 'FeatureCollection', features });
-  }, [ready, stops, selectedId]);
+  }, [ready, stops, selectedId, autoWalkCoords]);
 
   // Render active / selected transit candidate steps on the map with Naver-style callout bubbles
   useEffect(() => {
