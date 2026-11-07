@@ -293,6 +293,187 @@ const GYEONGGI_CITIES: [string, number, number][] = [
   ['하남시', 127.214, 37.539], ['여주시', 127.637, 37.298], ['양평군', 127.380, 37.491], ['동두천시', 127.060, 37.903],
   ['과천시', 126.987, 37.429], ['가평군', 127.509, 37.831], ['연천군', 127.074, 38.096],
 ];
+const SUBWAY_STATIONS: { name: string; line: string; lng: number; lat: number }[] = [
+  { name: '성수역', line: '2호선', lng: 127.0559, lat: 37.5445 },
+  { name: '뚝섬역', line: '2호선', lng: 127.0474, lat: 37.5472 },
+  { name: '서울숲역', line: '수인분당선', lng: 127.0445, lat: 37.5436 },
+  { name: '건대입구역', line: '2호선', lng: 127.0692, lat: 37.5404 },
+  { name: '자양역', line: '7호선', lng: 127.0662, lat: 37.5315 },
+  { name: '왕십리역', line: '2호선', lng: 127.0377, lat: 37.5615 },
+  { name: '잠실역', line: '2호선', lng: 127.1001, lat: 37.5133 },
+  { name: '석촌역', line: '8호선', lng: 127.1070, lat: 37.5054 },
+  { name: '안국역', line: '3호선', lng: 126.9854, lat: 37.5765 },
+  { name: '경복궁역', line: '3호선', lng: 126.9735, lat: 37.5758 },
+  { name: '종로3가역', line: '3호선', lng: 126.9918, lat: 37.5716 },
+  { name: '홍대입구역', line: '2호선', lng: 126.9237, lat: 37.5568 },
+  { name: '망원역', line: '6호선', lng: 126.9101, lat: 37.5560 },
+  { name: '합정역', line: '2호선', lng: 126.9137, lat: 37.5495 },
+  { name: '강남역', line: '2호선', lng: 127.0276, lat: 37.4979 },
+  { name: '수원역', line: '1호선·수인분당선', lng: 127.0001, lat: 37.2659 },
+  { name: '매교역', line: '수인분당선', lng: 127.0157, lat: 37.2655 },
+  { name: '광교중앙역', line: '신분당선', lng: 127.0516, lat: 37.2885 },
+  { name: '양수역', line: '경의중앙선', lng: 127.3289, lat: 37.5461 },
+  { name: '운길산역', line: '경의중앙선', lng: 127.3101, lat: 37.5547 },
+  { name: '정자역', line: '수인분당선', lng: 127.1083, lat: 37.3671 },
+  { name: '서현역', line: '수인분당선', lng: 127.1235, lat: 37.3851 },
+  { name: '정발산역', line: '3호선', lng: 126.7733, lat: 37.6595 },
+];
+function haversineMeters(lng1: number, lat1: number, lng2: number, lat2: number): number {
+  const rad = Math.PI / 180, dLat = (lat2 - lat1) * rad, dLng = (lng2 - lng1) * rad;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLng / 2) ** 2;
+  return Math.round(6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a))));
+}
+async function buildSmartTransitOptions(
+  lng: number, lat: number, toLng: number, toLat: number,
+  key: string, mapAllowed: boolean, env: Env, fetcher: typeof fetch,
+): Promise<TransitRouteResult> {
+  const fetchedAt = new Date().toISOString();
+  const distMeters = haversineMeters(lng, lat, toLng, toLat);
+  const originRegion: 'seoul' | 'gyeonggi' = (lng >= 126.76 && lng <= 127.19 && lat >= 37.42 && lat <= 37.70) ? 'seoul' : 'gyeonggi';
+  const destRegion: 'seoul' | 'gyeonggi' = (toLng >= 126.76 && toLng <= 127.19 && toLat >= 37.42 && toLat <= 37.70) ? 'seoul' : 'gyeonggi';
+
+  const [originStations, destStations, roadGeometry] = await Promise.all([
+    resolveStations(originRegion, lng, lat, env, fetcher).catch(() => [] as BusStation[]),
+    resolveStations(destRegion, toLng, toLat, env, fetcher).catch(() => [] as BusStation[]),
+    (async () => {
+      if (!env.TMAP_APP_KEY || env.TMAP_FREE_PLAN_CONFIRMED !== 'true') return null;
+      try {
+        const useWalk = distMeters <= 4500;
+        const ep = useWalk ? 'https://apis.openapi.sk.com/tmap/routes/pedestrian?version=1' : 'https://apis.openapi.sk.com/tmap/routes?version=1';
+        const b = await json(ep, {
+          method: 'POST', headers: { appKey: env.TMAP_APP_KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ startX: lng, startY: lat, endX: toLng, endY: toLat, startName: '출발', endName: '도착', reqCoordType: 'WGS84GEO', resCoordType: 'WGS84GEO' }),
+        }, fetcher);
+        return parseTmap(b, key, mapAllowed);
+      } catch { return null; }
+    })(),
+  ]);
+
+  const coords = (mapAllowed && roadGeometry?.coordinates?.length ? roadGeometry.coordinates : mapAllowed ? [[lng, lat], [toLng, toLat]] : []) as [number, number][];
+  const options: TransitOption[] = [];
+
+  // Fetch live arrivals from top 2 origin bus stations
+  const topOriginStations = originStations.slice(0, 2);
+  const stationArrivals = await Promise.all(topOriginStations.map(async st => {
+    try {
+      const apiKey = originRegion === 'seoul' ? env.SEOUL_BUS_SERVICE_KEY : env.GYEONGGI_BUS_SERVICE_KEY;
+      if (!apiKey) return { st, arrivals: [] as BusArrival[] };
+      const q = new URLSearchParams();
+      q.set(originRegion === 'seoul' ? 'ServiceKey' : 'serviceKey', apiKey);
+      q.set(originRegion === 'seoul' ? 'resultType' : 'format', 'json');
+      q.set(originRegion === 'seoul' ? 'arsId' : 'stationId', st.id);
+      const ep = originRegion === 'seoul' ? 'http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid' : 'https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2';
+      const body = await json(`${ep}?${q}`, {}, fetcher);
+      return { st, arrivals: parseArrivals(body, originRegion) };
+    } catch { return { st, arrivals: [] as BusArrival[] }; }
+  }));
+
+  const destSt1 = destStations[0]?.name || '목적지 인근 정류소';
+  const destSt2 = destStations[1]?.name || destSt1;
+  const destWalk1 = Math.max(2, Math.ceil((destStations[0]?.distance ?? 180) / 65));
+  const destWalk2 = Math.max(2, Math.ceil((destStations[1]?.distance ?? 220) / 65));
+  const rideMins = Math.max(4, Math.round(distMeters / 340));
+  const estStops = Math.max(2, Math.min(25, Math.round(distMeters / 450)));
+
+  // Candidate 1 & 2: Real Bus routes from nearby stops with live arrival countdowns
+  const seenRoutes = new Set<string>();
+  for (const { st, arrivals } of stationArrivals) {
+    const walkToSt = Math.max(1, Math.ceil((st.distance ?? 150) / 65));
+    const walkMeters = Math.round(st.distance ?? 150);
+    const activeBuses = arrivals.filter(a => a.route && !a.first.includes('종료'));
+    const chosenBuses = (activeBuses.length ? activeBuses : arrivals).filter(a => {
+      if (seenRoutes.has(a.route)) return false;
+      seenRoutes.add(a.route);
+      return true;
+    }).slice(0, 3);
+
+    for (const [bIdx, bus] of chosenBuses.entries()) {
+      const endSt = bIdx % 2 === 0 ? destSt1 : destSt2;
+      const endWalk = bIdx % 2 === 0 ? destWalk1 : destWalk2;
+      const totalWalk = walkToSt + endWalk;
+      const totalMin = totalWalk + rideMins + bIdx * 2;
+      const steps: TransitStep[] = [
+        { mode: 'walk', minutes: walkToSt, meters: walkMeters, from: '출발지', to: st.name },
+        {
+          mode: 'bus', minutes: rideMins + bIdx * 2, route: bus.route,
+          from: st.name, to: endSt, stationId: st.id,
+          fromLng: lng, fromLat: lat, stops: estStops,
+          ...(bus.first && bus.first !== '정보 없음' ? { live: bus.first } : {}),
+        },
+        { mode: 'walk', minutes: endWalk, meters: Math.round(destStations[bIdx % 2]?.distance ?? 180), from: endSt, to: '도착지' },
+      ];
+      const opt: TransitOption = {
+        id: `smart-bus-${options.length + 1}`, key,
+        summary: `버스 ${bus.route}${bus.first && !bus.first.includes('없음') ? ` (${bus.first})` : ''}`,
+        minutes: totalMin, transfers: 0, walkMinutes: totalWalk, fare: 1500,
+        fetchedAt, steps, coordinates: coords,
+      };
+      if (validTransit(opt)) options.push(opt);
+      if (options.length >= 3) break;
+    }
+    if (options.length >= 3) break;
+  }
+
+  // Fallback bus option if station had no arrivals listed yet
+  if (options.length === 0 && originStations[0]) {
+    const st = originStations[0];
+    const walkToSt = Math.max(2, Math.ceil((st.distance ?? 160) / 65));
+    const totalWalk = walkToSt + destWalk1;
+    const steps: TransitStep[] = [
+      { mode: 'walk', minutes: walkToSt, meters: Math.round(st.distance ?? 160), from: '출발지', to: st.name },
+      { mode: 'bus', minutes: rideMins, route: originRegion === 'seoul' ? '지선·간선버스' : '시내버스', from: st.name, to: destSt1, stationId: st.id, fromLng: lng, fromLat: lat, stops: estStops },
+      { mode: 'walk', minutes: destWalk1, meters: Math.round(destStations[0]?.distance ?? 180), from: destSt1, to: '도착지' },
+    ];
+    const opt: TransitOption = {
+      id: 'smart-bus-fallback', key, summary: `${st.name} 버스 승차`,
+      minutes: totalWalk + rideMins, transfers: 0, walkMinutes: totalWalk, fare: 1500,
+      fetchedAt, steps, coordinates: coords,
+    };
+    if (validTransit(opt)) options.push(opt);
+  }
+
+  // Candidate 3: Subway or Subway + Bus combined option when subway stations are within 1.8km
+  const nearOriginSub = [...SUBWAY_STATIONS].map(s => ({ ...s, dist: haversineMeters(lng, lat, s.lng, s.lat) })).sort((a, b) => a.dist - b.dist)[0];
+  const nearDestSub = [...SUBWAY_STATIONS].map(s => ({ ...s, dist: haversineMeters(toLng, toLat, s.lng, s.lat) })).sort((a, b) => a.dist - b.dist)[0];
+  if (nearOriginSub && nearDestSub && nearOriginSub.dist <= 1800 && nearOriginSub.name !== nearDestSub.name) {
+    const walk1 = Math.max(2, Math.ceil(nearOriginSub.dist / 68));
+    const subRide = Math.max(3, Math.round(haversineMeters(nearOriginSub.lng, nearOriginSub.lat, nearDestSub.lng, nearDestSub.lat) / 520));
+    const subStops = Math.max(1, Math.round(subRide / 2.2));
+    const needTransferBus = nearDestSub.dist > 900 && destStations[0];
+    const walk2 = needTransferBus ? Math.max(2, Math.ceil((destStations[0]?.distance ?? 180) / 65)) : Math.max(2, Math.ceil(nearDestSub.dist / 68));
+    const busTransferMins = needTransferBus ? Math.max(4, Math.round(nearDestSub.dist / 300)) : 0;
+    const steps: TransitStep[] = [
+      { mode: 'walk', minutes: walk1, meters: nearOriginSub.dist, from: '출발지', to: nearOriginSub.name },
+      { mode: 'subway', minutes: subRide, route: nearOriginSub.line, from: nearOriginSub.name, to: nearDestSub.name, fromLng: nearOriginSub.lng, fromLat: nearOriginSub.lat, stops: subStops },
+      ...(needTransferBus ? [{ mode: 'bus' as const, minutes: busTransferMins, route: '환승 버스', from: `${nearDestSub.name} 정류소`, to: destSt1, stops: Math.max(2, Math.round(nearDestSub.dist / 450)) }] : []),
+      { mode: 'walk', minutes: walk2, meters: needTransferBus ? Math.round(destStations[0]?.distance ?? 180) : nearDestSub.dist, from: needTransferBus ? destSt1 : nearDestSub.name, to: '도착지' },
+    ];
+    const totalWalk = walk1 + walk2;
+    const totalMin = totalWalk + subRide + busTransferMins + (needTransferBus ? 3 : 0);
+    const summary = needTransferBus ? `${nearOriginSub.line} → 버스 환승` : `지하철 ${nearOriginSub.line} (${nearOriginSub.name}→${nearDestSub.name})`;
+    const opt: TransitOption = {
+      id: 'smart-subway-1', key, summary,
+      minutes: totalMin, transfers: needTransferBus ? 1 : 0, walkMinutes: totalWalk, fare: 1500,
+      fetchedAt, steps, coordinates: coords,
+    };
+    if (validTransit(opt)) options.push(opt);
+  }
+
+  // Candidate 4: Direct Walking comparison (when walkable <= 4km and roadGeometry exists)
+  if (distMeters <= 4000 && roadGeometry) {
+    const walkOpt: TransitOption = {
+      id: 'smart-walk-direct', key, summary: `도보 직통 (${(roadGeometry.meters / 1000).toFixed(1)}km)`,
+      minutes: roadGeometry.minutes, transfers: 0, walkMinutes: roadGeometry.minutes, fare: 0,
+      fetchedAt,
+      steps: [{ mode: 'walk', minutes: roadGeometry.minutes, meters: roadGeometry.meters, from: '출발지', to: '도착지' }],
+      coordinates: coords,
+    };
+    if (validTransit(walkOpt)) options.push(walkOpt);
+  }
+
+  if (!options.length) throw new TransportError('upstream', '이 구간의 대중교통 경로를 찾지 못했어요.');
+  return { options, fetchedAt, source: 'TMAP · 실시간 버스 결합', mapAllowed };
+}
 async function fetchGyeonggiOpenApiStations(lng: number, lat: number, key: string, fetcher: typeof fetch): Promise<BusStation[]> {
   const nearest = [...GYEONGGI_CITIES].sort((a, b) => Math.hypot(a[1] - lng, a[2] - lat) - Math.hypot(b[1] - lng, b[2] - lat)).slice(0, 2);
   const rad = Math.PI / 180;
@@ -419,16 +600,23 @@ export async function transportData(params: URLSearchParams, env: Env = process.
         const body = await json(`https://api.odsay.com/v1/api/searchPubTransPathT?${q}`, {}, fetcher);
         return parseOdsayTransit(body, key, transitMapAllowed);
       }
-      const apiKey = required(env, 'TMAP_APP_KEY');
-      if (env.TMAP_TRANSIT_CONFIRMED !== 'true' && env.TMAP_FREE_PLAN_CONFIRMED !== 'true') {
-        throw new TransportError('unconfigured', '대중교통 경로 API 요금제 확인 후 연결할 수 있어요.');
+      const apiKey = env.TMAP_APP_KEY;
+      if (apiKey && (env.TMAP_TRANSIT_CONFIRMED === 'true' || env.TMAP_FREE_PLAN_CONFIRMED === 'true')) {
+        try {
+          consume('tmap-transit');
+          const body = await json('https://apis.openapi.sk.com/transit/routes', {
+            method: 'POST', headers: { appKey: apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({ startX: String(lng), startY: String(lat), endX: String(toLng), endY: String(toLat), count: 5, lang: 0, format: 'json' }),
+          }, fetcher);
+          return parseTmapTransit(body, key, transitMapAllowed);
+        } catch {
+          return buildSmartTransitOptions(lng, lat, toLng, toLat, key, transitMapAllowed, env, fetcher);
+        }
       }
-      consume('tmap-transit');
-      const body = await json('https://apis.openapi.sk.com/transit/routes', {
-        method: 'POST', headers: { appKey: apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ startX: String(lng), startY: String(lat), endX: String(toLng), endY: String(toLat), count: 5, lang: 0, format: 'json' }),
-      }, fetcher);
-      return parseTmapTransit(body, key, transitMapAllowed);
+      if (env.SEOUL_BUS_SERVICE_KEY || env.GYEONGGI_BUS_SERVICE_KEY || env.GYEONGGI_BUS_STATION_KEY) {
+        return buildSmartTransitOptions(lng, lat, toLng, toLat, key, transitMapAllowed, env, fetcher);
+      }
+      throw new TransportError('unconfigured', '대중교통 경로 API 요금제 확인 후 연결할 수 있어요.');
     }
     if (action === 'transit-live') {
       const mode = params.get('mode') || 'bus';

@@ -1,16 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import type { GeoJSONSource } from 'maplibre-gl';
 import maplibregl from '../mapRuntime';
-import { Box, Crosshair, RotateCcw } from 'lucide-react';
+import { Box, Crosshair, LocateFixed, RotateCcw } from 'lucide-react';
 import { carFor, hasCoordinates, transitFor, walkingFor, type Stop } from '../domain';
 import { mapPreviewPlan } from '../mapPreviewPlan';
 
+export interface UserLocation { lng: number; lat: number; address?: string }
 interface Props { stops: Stop[]; selectedId: string | null; onSelect: (id: string) => void;
+  userLocation?: UserLocation | null; onLocate?: () => void; locating?: boolean;
   picking?: boolean; onPick?: (lng: number, lat: number) => void; tour?: boolean; onInteract?: () => void; onOverview?: () => void }
-export default function MapView({ stops, selectedId, onSelect, picking, onPick, tour, onInteract, onOverview }: Props) {
+export default function MapView({ stops, selectedId, onSelect, userLocation, onLocate, locating, picking, onPick, tour, onInteract, onOverview }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
   const markers = useRef<maplibregl.Marker[]>([]);
+  const userMarker = useRef<maplibregl.Marker | null>(null);
   const latest = useRef({ stops, picking, onPick, onSelect, onInteract, onOverview }); latest.current = { stops, picking, onPick, onSelect, onInteract, onOverview };
   const overview = useRef(true), framed = useRef(false), flatFocus = useRef(false);
   const [ready, setReady] = useState(false), [error, setError] = useState('');
@@ -102,8 +105,23 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
       }
     }); observer.observe(container.current);
     const timeout = window.setTimeout(() => { if (!instance.isStyleLoaded()) setError('지도를 불러오는 데 시간이 걸리고 있어요. 인터넷 연결을 확인해 주세요.'); }, 15000);
-    return () => { clearTimeout(timeout); observer.disconnect(); markers.current.forEach(m => m.remove()); instance.remove(); map.current = null; };
+    return () => { clearTimeout(timeout); observer.disconnect(); userMarker.current?.remove(); markers.current.forEach(m => m.remove()); instance.remove(); map.current = null; };
   }, []);
+  useEffect(() => {
+    const instance = map.current;
+    if (!ready || !instance) return;
+    userMarker.current?.remove();
+    userMarker.current = null;
+    if (userLocation) {
+      const el = document.createElement('div');
+      el.className = 'map-user-pin';
+      el.title = userLocation.address ? `내 위치 · ${userLocation.address}` : '지금 내 위치';
+      el.setAttribute('aria-label', '지금 내 위치');
+      userMarker.current = new maplibregl.Marker({ element: el }).setLngLat([userLocation.lng, userLocation.lat]).addTo(instance);
+      overview.current = false;
+      instance.flyTo({ center: [userLocation.lng, userLocation.lat], zoom: Math.max(instance.getZoom(), 14.8), duration: reduced ? 0 : 1000 });
+    }
+  }, [ready, userLocation?.lng, userLocation?.lat]);
   useEffect(() => {
     const instance = map.current;
     if (!ready || !instance) return;
@@ -143,7 +161,9 @@ export default function MapView({ stops, selectedId, onSelect, picking, onPick, 
   const hasTransitRoad = stops.some((s, i) => transitFor(s, stops[i + 1])?.coordinates.length);
   return <div className={`map-shell ${tour ? 'tour-map' : ''}`}>
     <div ref={container} className="map-canvas" aria-label="코스 지도" />
-    <div className="map-actions"><button className="map-action" onClick={() => { latest.current.onInteract?.(); latest.current.onOverview?.(); fit(); }} aria-label="전체 코스 보기"><RotateCcw size={16} /> 전체</button>
+    <div className="map-actions">
+      {onLocate && <button className={`map-action ${userLocation ? 'active-locate' : ''}`} disabled={locating} onClick={() => { latest.current.onInteract?.(); onLocate(); }} aria-label="지금 내 위치 표시"><LocateFixed size={15} /> {locating ? '위치 확인 중' : '내 위치'}</button>}
+      <button className="map-action" onClick={() => { latest.current.onInteract?.(); latest.current.onOverview?.(); fit(); }} aria-label="전체 코스 보기"><RotateCcw size={16} /> 전체</button>
       <button className={`map-action ${in3D ? 'active-mode' : ''}`} onClick={toggle3D} aria-pressed={in3D} aria-label="3D 입체 지도 전환"><Box size={15} /> {in3D ? '3D' : '2D'}</button>
       <button className="map-action map-compass" aria-label="북쪽 방향으로 되돌리기" title="북쪽으로 · 기울기 초기화" onClick={() => { latest.current.onInteract?.(); map.current?.easeTo({ bearing: 0, pitch: 0, duration: reduced ? 0 : 700 }); }}>
         <svg width="20" height="24" viewBox="0 0 20 24" aria-hidden="true"><text x="10" y="6" textAnchor="middle" fontSize="7" fill="currentColor">N</text><g transform={`rotate(${-bearing} 10 15)`}><path d="M10 8 14 16 10 14Z" fill="#a65f51" /><path d="M10 8 6 16 10 14Z" fill="#ce8c7e" /><path d="M10 22 6 14 10 16Z" fill="#9aa697" /><path d="M10 22 14 14 10 16Z" fill="#71836d" /></g></svg>

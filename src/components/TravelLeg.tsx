@@ -111,12 +111,23 @@ export default function TravelLeg({ from, to, departure, region, readonly, onPat
           {busy && <button className="icon-button" aria-label="대중교통 조회 취소" onClick={cancel}><X size={17} /></button>}
         </div>
         {(!hasCoordinates(from) || !hasCoordinates(to)) && <p className="journey-source">두 장소의 지도 위치를 먼저 지정하세요.</p>}
-        {options.length > 1 && <div className="transit-options" role="group" aria-label="추천 대중교통 경로">
-          {options.map(opt => {
+        {options.length > 0 && <div className="transit-options" role="group" aria-label="추천 대중교통 후보 경로">
+          {options.map((opt, idx) => {
             const active = transit?.summary === opt.summary && transit?.minutes === opt.minutes;
             return <button key={opt.id} type="button" className={`transit-option ${active ? 'selected' : ''}`} onClick={() => applyOption(opt)}>
-              <strong>{opt.minutes}분 · {opt.summary}</strong>
+              <div className="transit-option-head">
+                <strong>후보 {idx + 1} · {opt.minutes}분 ({opt.summary})</strong>
+                <small>{active ? '선택됨' : '선택'}</small>
+              </div>
               <small>환승 {opt.transfers}회 · 도보 {opt.walkMinutes}분{opt.fare ? ` · ${opt.fare.toLocaleString('ko-KR')}원` : ''}</small>
+              <div className="candidate-step-flow">
+                {opt.steps.map((s, sIdx) => <span key={`${opt.id}:${sIdx}`} className="flow-item">
+                  {sIdx > 0 && <span className="flow-arrow">→</span>}
+                  <span className={`flow-chip mode-${s.mode}`}>
+                    {stepLabels[s.mode]}{s.route ? ` ${s.route}` : ''} {s.minutes}분{s.live ? ` (${s.live})` : ''}
+                  </span>
+                </span>)}
+              </div>
             </button>;
           })}
         </div>}
@@ -130,7 +141,7 @@ export default function TravelLeg({ from, to, departure, region, readonly, onPat
               <span className="step-badge">{s.route ? `${stepLabels[s.mode]} ${s.route}` : stepLabels[s.mode]}</span>
               <span className="step-body">
                 {s.from || s.to ? `${s.from || '출발'} → ${s.to || '도착'}` : '구간 이동'}
-                <small>{s.minutes}분{s.stops ? ` · ${s.stops}정류장` : s.meters ? ` · ${s.meters}m` : ''}</small>
+                <small>{s.minutes}분{s.stops ? ` · ${s.stops}정류장` : s.meters ? ` · ${s.meters}m` : ''}{s.live ? ` · 실시간 ${s.live}` : ''}</small>
               </span>
             </li>)}
           </ol>

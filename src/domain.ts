@@ -18,7 +18,7 @@ export interface WalkingLeg {
 export interface TransitStep {
   mode: TransitStepMode; minutes: number; meters?: number;
   route?: string; from?: string; to?: string; stationId?: string;
-  fromLng?: number; fromLat?: number; stops?: number;
+  fromLng?: number; fromLat?: number; stops?: number; live?: string;
 }
 export interface TransitLeg {
   key: string; summary: string; minutes: number; transfers: number;
@@ -133,7 +133,8 @@ export function validTransitStep(v: unknown): v is TransitStep {
     && (v.route === undefined || str(v.route, 80)) && (v.from === undefined || str(v.from, 100))
     && (v.to === undefined || str(v.to, 100)) && (v.stationId === undefined || str(v.stationId, 50))
     && (v.fromLng === undefined || num(v.fromLng, -180, 180)) && (v.fromLat === undefined || num(v.fromLat, -85, 85))
-    && (v.stops === undefined || (num(v.stops, 0, 300) && Number.isInteger(v.stops)));
+    && (v.stops === undefined || (num(v.stops, 0, 300) && Number.isInteger(v.stops)))
+    && (v.live === undefined || str(v.live, 80));
 }
 export function validTransit(v: unknown): v is TransitLeg {
   return obj(v) && str(v.key, 150) && str(v.summary, 160)

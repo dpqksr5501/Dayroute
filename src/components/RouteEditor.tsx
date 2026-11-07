@@ -1,8 +1,9 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowDown, ArrowUp, Check, Clock3, Coffee, Copy, ExternalLink, GripVertical, MapPin,
+import { ArrowLeft, ArrowDown, ArrowUp, Check, Clock3, Coffee, Copy, ExternalLink, GripVertical, LocateFixed, MapPin,
   Plus, Play, Share2, Trash2, Utensils, Trees, Palette, ShoppingBag, ChevronDown, CalendarDays, BusFront, Navigation, Pencil } from 'lucide-react';
-import { formatDuration, hasCoordinates, schedule, totalMinutes, type Category, type Route, type Stop } from '../domain';
+import { formatDuration, hasCoordinates, schedule, totalMinutes, transitFor, walkingFor, type Category, type Route, type Stop, type TransitLeg } from '../domain';
 import { reverseGeocodeParams, transportRequest } from '../transport';
+import type { UserLocation } from './MapView';
 import PlacePicker from './PlacePicker';
 import RouteCover from './RouteCover';
 import CoverPhotoControl from './CoverPhotoControl';
@@ -23,7 +24,22 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
   const [preview, setPreview] = useState(readonly), [mobileMap, setMobileMap] = useState(() => route.stops.length > 0 && window.matchMedia('(max-width: 760px)').matches);
   const [tour, setTour] = useState(false), [details, setDetails] = useState(false);
   const [busStop, setBusStop] = useState<string | null>(null);
+  const [userLocation, setUserLocation] = useState<UserLocation | null>(null), [locating, setLocating] = useState(false);
   const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 760px)').matches);
+  const locateMe = () => {
+    if (!navigator.geolocation || locating) return;
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(pos => {
+      const lng = pos.coords.longitude, lat = pos.coords.latitude;
+      setUserLocation({ lng, lat });
+      setLocating(false);
+      void transportRequest<{ address: string }>(reverseGeocodeParams(lng, lat), new AbortController().signal, 3600000)
+        .then(r => { if (r.address) setUserLocation({ lng, lat, address: r.address }); }).catch(() => {});
+    }, () => { setLocating(false); }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+  };
+  const applyTransit = (stopId: string, leg: TransitLeg) => {
+    patchStop(stopId, { mode: 'transit', transit: leg, travelMinutes: leg.minutes });
+  };
   useEffect(() => {
     const media = window.matchMedia('(max-width: 760px)');
     const update = () => setNarrow(media.matches); media.addEventListener('change', update);
@@ -64,7 +80,7 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
           {preview ? <h1 className="route-heading">{route.title}</h1> : <input className="route-title-input" aria-label="코스 제목" value={route.title} maxLength={100} onChange={e => patch({ title: e.target.value })} />}
           {preview && route.description && <p className="route-description">{route.description}</p>}
           <div className="route-meta"><span><CalendarDays size={15} />{route.date ? route.date.replaceAll('-', '.') : '날짜 미정'}</span><span><MapPin size={15} />{route.stops.length}곳</span><span title="체류 시간과 구간별 예상 이동 시간을 합친 계획이에요"><Clock3 size={15} />일정 {formatDuration(totalMinutes(route))}</span></div>
-          <button className="bus-entry" onClick={() => setBusStop(selected || route.stops[0]?.id || '')}><BusFront size={18} /><span>버스 도착</span><span>현재 기준</span></button>
+          <button className="bus-entry" onClick={() => setBusStop(selected || route.stops[0]?.id || '')}><BusFront size={18} /><span>실시간 경로 · 대중교통 후보</span><span>내 위치 · 도보+버스/지하철</span></button>
           {!preview && <><button className="details-toggle" aria-expanded={details} onClick={() => setDetails(!details)}><CalendarDays size={15} /> 코스 설정 <ChevronDown size={15} className={details ? 'rotate' : ''} /></button>
             {details && <div className="route-settings form-grid"><label>날짜<input type="date" value={route.date} onChange={e => patch({ date: e.target.value })} /></label><label>시작 시간<input type="time" value={route.startTime} onChange={e => patch({ startTime: e.target.value || '12:00' })} /></label>
               <label>지역<input value={route.region} maxLength={100} placeholder="서울 · 성수" onChange={e => patch({ region: e.target.value })} /></label><label>색상<select value={route.theme} onChange={e => patch({ theme: e.target.value as Route['theme'] })}><option value="forest">세이지</option><option value="town">샌드</option><option value="river">블루</option></select></label><label className="span-2">소개<textarea rows={2} aria-label="코스 소개" value={route.description} maxLength={1000} onChange={e => patch({ description: e.target.value })} /></label></div>}</>}
@@ -105,7 +121,7 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
       </section>
       <aside className={`map-pane ${mobileMap ? 'mobile-visible' : ''}`}>
         <Suspense fallback={<div className="map-placeholder"><span className="spinner" /> 지도를 준비하고 있어요</div>}>
-          {(!narrow || mobileMap) && <MapView stops={route.stops} selectedId={selected} onSelect={id => { setTour(false); setSelected(id); }} onInteract={() => setTour(false)} onOverview={() => { setSelected(null); setTour(false); }} picking={!!picking} tour={preview} onPick={(lng, lat) => {
+          {(!narrow || mobileMap) && <MapView stops={route.stops} selectedId={selected} userLocation={userLocation} locating={locating} onLocate={locateMe} onSelect={id => { setTour(false); setSelected(id); }} onInteract={() => setTour(false)} onOverview={() => { setSelected(null); setTour(false); }} picking={!!picking} tour={preview} onPick={(lng, lat) => {
             if (picking && !readonly) {
               const targetId = picking, currentStop = latestRoute.current.stops.find(s => s.id === targetId);
               patchStop(targetId, { lng, lat });
@@ -117,12 +133,27 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
             setPicking(null); setMobileMap(false);
           }} />}
         </Suspense>
+        {route.stops.length > 0 && <div className="map-leg-strip" aria-label="순서별 경로 바로가기">
+          <button type="button" className={`map-leg-chip ${userLocation ? 'active' : ''}`} onClick={() => { if (!userLocation) locateMe(); setBusStop(route.stops[0]?.id || ''); }}>
+            <LocateFixed size={13} />
+            <span>{userLocation ? `내 위치 → 1. ${route.stops[0]?.name || '첫 장소'}` : '지금 내 위치 출발'}</span>
+          </button>
+          {route.stops.slice(0, -1).map((s, idx) => {
+            const next = route.stops[idx + 1];
+            const tr = transitFor(s, next), wk = walkingFor(s, next);
+            const sub = tr ? `${tr.minutes}분 · ${tr.summary}` : wk ? `도보 ${wk.minutes}분` : '후보 경로 보기';
+            return <button key={s.id} type="button" className="map-leg-chip" onClick={() => setBusStop(s.id)}>
+              <strong>{idx + 1}→{idx + 2}</strong>
+              <span>{s.name || '장소'} → {next.name || '장소'} <em>({sub})</em></span>
+            </button>;
+          })}
+        </div>}
         <div className="map-tour-control"><div><h3>{current?.name || route.title}</h3><p>{current ? `${times[route.stops.indexOf(current)]} 도착 · ${current.duration}분 머물기` : `${route.stops.length}곳 · ${route.startTime} 출발`}</p></div>
-          <div className="map-bottom-actions"><button className="secondary" aria-label="버스 도착 열기" onClick={() => setBusStop(selected || route.stops[0]?.id || '')}><BusFront size={18} /></button><button className="primary" disabled={!route.stops.some(hasCoordinates)} onClick={() => setTour(!tour)}><Play size={16} fill="currentColor" />{tour ? '멈추기' : '둘러보기'}</button></div></div>
+          <div className="map-bottom-actions"><button className="secondary map-bus-btn" aria-label="실시간 경로 및 버스 후보 열기" onClick={() => setBusStop(selected || route.stops[0]?.id || '')}><BusFront size={16} /> 경로·버스</button><button className="primary" disabled={!route.stops.some(hasCoordinates)} onClick={() => setTour(!tour)}><Play size={16} fill="currentColor" />{tour ? '멈추기' : '둘러보기'}</button></div></div>
       </aside>
     </div>
     <div className="mobile-view-tabs" role="group" aria-label="코스 화면"><button aria-pressed={mobileMap} onClick={() => { setMobileMap(true); window.scrollTo(0, 0); }}><MapPin size={17} />지도</button><button aria-pressed={!mobileMap} onClick={() => setMobileMap(false)}><CalendarDays size={17} />일정</button></div>
     {adding && <PlacePicker onClose={() => setAdding(false)} onAdd={stop => { if (patch({ stops: [...latestRoute.current.stops, stop] })) { setAdding(false); setExpanded(stop.id); setSelected(stop.id); } }} />}
-    {busStop !== null && <BusPanel stops={route.stops} initialStop={busStop} region={route.region} onClose={() => setBusStop(null)} />}
+    {busStop !== null && <BusPanel stops={route.stops} initialStop={busStop} region={route.region} userLocation={userLocation} locating={locating} onLocate={locateMe} onApplyTransit={applyTransit} readonly={readonly || preview} onClose={() => setBusStop(null)} />}
   </>;
 }
