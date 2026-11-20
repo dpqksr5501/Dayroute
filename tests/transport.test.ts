@@ -1,8 +1,9 @@
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { carFor, decodeShare, encodeShare, legMinutes, makeRoute, makeStop, routeText, transitFor, walkingKey } from '../src/domain.ts';
 import { firstTransitStep, normalizeRouteName } from '../src/transport.ts';
-import { matchRouteArrivals, parseOdsayTransit, parseTmapPois, parseTmapReverseGeocode, parseTmapTransit, transportData, TransportError } from '../server/transport.ts';
+import { handleTransport, matchRouteArrivals, parseOdsayTransit, parseTmapPois, parseTmapReverseGeocode, parseTmapTransit, transportData, TransportError } from '../server/transport.ts';
 
 test('normalizeRouteName and matchRouteArrivals match transit route numbers against station arrivals', () => {
   assert.equal(normalizeRouteName('간선:302'), '302');
@@ -242,5 +243,72 @@ test('transportData deduplicates concurrent identical inflight upstream requests
   assert.equal(fetchCount, 1);
   assert.equal(first[0].name, '성수 서점');
   assert.equal(second[0].name, '성수 서점');
+});
+
+test('transportData normalizes cache keys to ignore unknown query parameters', async () => {
+  let fetchCount = 0;
+  const fakeFetch: typeof fetch = async () => {
+    fetchCount += 1;
+    return new Response(JSON.stringify({
+      searchPoiInfo: { pois: { poi: [{ id: 'p2', name: '뚝섬 공원', noorLon: '127.047', noorLat: '37.547' }] } },
+    }), { status: 200 });
+  };
+  const env = { TMAP_APP_KEY: 'test-key', TMAP_FREE_PLAN_CONFIRMED: 'true' };
+  const first = await transportData(new URLSearchParams({ action: 'pois', q: '뚝섬캐시정규화', junk: 'a' }), env, fakeFetch) as { name: string }[];
+  const second = await transportData(new URLSearchParams({ action: 'pois', q: '뚝섬캐시정규화', junk: 'b' }), env, fakeFetch) as { name: string }[];
+  assert.equal(fetchCount, 1);
+  assert.equal(first[0].name, '뚝섬 공원');
+  assert.equal(second[0].name, '뚝섬 공원');
+});
+
+function runMockTransport(reqInit: { method?: string; url?: string; headers?: Record<string, string> }) {
+  const headers = new Map<string, string>();
+  let body = '';
+  const req = {
+    method: reqInit.method ?? 'GET',
+    url: reqInit.url ?? '/api/transport?action=status',
+    headers: reqInit.headers ?? { host: 'dayroute.example' },
+    socket: { remoteAddress: '127.0.0.1' },
+  } as unknown as IncomingMessage;
+  const res = {
+    statusCode: 200,
+    setHeader(name: string, value: string) { headers.set(name.toLowerCase(), value); },
+    end(chunk?: string) { body = String(chunk || ''); },
+  } as unknown as ServerResponse;
+  return handleTransport(req, res, {}).then(() => ({ statusCode: res.statusCode, headers, body: JSON.parse(body || '{}') }));
+}
+
+test('handleTransport enforces GET, origin/cross-site checks, URL length limits, and security headers', async () => {
+  const postRes = await runMockTransport({ method: 'POST' });
+  assert.equal(postRes.statusCode, 405);
+  assert.equal(postRes.headers.get('allow'), 'GET');
+  assert.equal(postRes.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(postRes.headers.get('cache-control'), 'no-store');
+
+  const malformedOrigin = await runMockTransport({
+    headers: { host: 'dayroute.example', origin: 'not-a-valid-url' },
+  });
+  assert.equal(malformedOrigin.statusCode, 403);
+
+  const foreignOrigin = await runMockTransport({
+    headers: { host: 'dayroute.example', origin: 'https://evil.example' },
+  });
+  assert.equal(foreignOrigin.statusCode, 403);
+
+  const crossSite = await runMockTransport({
+    headers: { host: 'dayroute.example', 'sec-fetch-site': 'cross-site' },
+  });
+  assert.equal(crossSite.statusCode, 403);
+
+  const longUrl = await runMockTransport({
+    url: `/api/transport?action=status&pad=${'a'.repeat(2100)}`,
+  });
+  assert.equal(longUrl.statusCode, 400);
+
+  const okRes = await runMockTransport({
+    headers: { host: 'dayroute.example', origin: 'https://dayroute.example', 'sec-fetch-site': 'same-origin' },
+  });
+  assert.equal(okRes.statusCode, 200);
+  assert.equal(okRes.body.data.walking, false);
 });
 

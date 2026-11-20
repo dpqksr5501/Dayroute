@@ -812,6 +812,43 @@ async function resolveStations(region: 'seoul' | 'gyeonggi', lng: number, lat: n
   required(env, region === 'seoul' ? 'SEOUL_BUS_SERVICE_KEY' : 'GYEONGGI_BUS_SERVICE_KEY');
   return [];
 }
+const ALLOWED_QUERY_KEYS = ['action', 'direction', 'lat', 'lng', 'mode', 'q', 'region', 'route', 'station', 'stationName', 'toLat', 'toLng'] as const;
+
+function normalizedCacheKey(params: URLSearchParams): string {
+  const normalized = new URLSearchParams();
+  for (const key of ALLOWED_QUERY_KEYS) {
+    const value = params.get(key);
+    if (value !== null && value !== '') normalized.set(key, value.slice(0, 200));
+  }
+  return normalized.toString();
+}
+
+function headerFirst(value: string | string[] | undefined): string {
+  return (Array.isArray(value) ? value[0] : value || '').trim();
+}
+
+function isAllowedRequestOrigin(req: IncomingMessage): boolean {
+  const fetchSite = headerFirst(req.headers['sec-fetch-site']).toLowerCase();
+  if (fetchSite === 'cross-site') return false;
+  const origin = headerFirst(req.headers.origin);
+  if (!origin) return true;
+  const host = headerFirst(req.headers.host);
+  if (!host) return false;
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false;
+  }
+}
+
+function clientIp(req: IncomingMessage): string {
+  const realIp = headerFirst(req.headers['x-real-ip']);
+  if (realIp) return realIp.slice(0, 100);
+  const forwarded = headerFirst(req.headers['x-forwarded-for']).split(',')[0]?.trim();
+  if (forwarded) return forwarded.slice(0, 100);
+  return String(req.socket?.remoteAddress || 'local').slice(0, 100);
+}
+
 export async function transportData(params: URLSearchParams, env: Env = process.env, fetcher: typeof fetch = fetch): Promise<unknown> {
   const action = params.get('action');
   const tmapEnabled = !!env.TMAP_APP_KEY && env.TMAP_FREE_PLAN_CONFIRMED === 'true';
@@ -831,7 +868,7 @@ export async function transportData(params: URLSearchParams, env: Env = process.
   if (!['walk', 'car', 'pois', 'reverse-geocode', 'transit', 'transit-live', 'stations', 'arrivals'].includes(action || '')) {
     throw new TransportError('invalid', '지원하지 않는 조회예요.');
   }
-  const cacheKey = params.toString();
+  const cacheKey = normalizedCacheKey(params);
   const hit = cache.get(cacheKey);
   if (hit && hit.until > Date.now()) return hit.data;
   if (inflight.has(cacheKey)) return inflight.get(cacheKey);
@@ -969,12 +1006,14 @@ export async function transportData(params: URLSearchParams, env: Env = process.
   inflight.set(cacheKey, pending); return pending;
 }
 export async function handleTransport(req: IncomingMessage, res: ServerResponse, env: Env = { ...DEFAULT_ENV, ...process.env }) {
-  res.setHeader('Content-Type', 'application/json; charset=utf-8'); res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
   const fail = (status: number, code: string, message: string) => { res.statusCode = status; res.end(JSON.stringify({ code, message })); };
   if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); return fail(405, 'invalid', 'GET 요청만 지원해요.'); }
-  const origin = req.headers.origin;
-  if (origin && new URL(origin).host !== req.headers.host) return fail(403, 'invalid', '앱에서 조회해 주세요.');
-  const ip = String(req.headers['x-real-ip'] || req.socket.remoteAddress || 'local');
+  if (!isAllowedRequestOrigin(req)) return fail(403, 'invalid', '앱에서 조회해 주세요.');
+  if ((req.url || '').length > 2048) return fail(400, 'invalid', '요청 주소가 너무 깁니다.');
+  const ip = clientIp(req);
   const now = Date.now();
   if (limits.size > 2000) for (const [k, v] of limits) if (v.reset < now) limits.delete(k);
   const limit = limits.get(ip);
