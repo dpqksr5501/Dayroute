@@ -1,13 +1,9 @@
 // Vercel Serverless Function (Node.js native ESM - zero external relative imports)
 const DEFAULT_ENV = {
-  TMAP_APP_KEY: 'flc95uzozka6TywmYxxPJ64QlvGQ5FGy1BhenT91',
   TMAP_FREE_PLAN_CONFIRMED: 'true',
   TMAP_MAP_DISPLAY_CONFIRMED: 'true',
   TMAP_TRANSIT_CONFIRMED: 'true',
   TRANSIT_MAP_DISPLAY_CONFIRMED: 'true',
-  SEOUL_BUS_SERVICE_KEY: 'a00202eb7f72ac207143e394f5cb09f84801efbccf9b367c06cf4d49aea512d2',
-  GYEONGGI_BUS_SERVICE_KEY: 'a00202eb7f72ac207143e394f5cb09f84801efbccf9b367c06cf4d49aea512d2',
-  GYEONGGI_BUS_STATION_KEY: 'b56a4048021a4cb2bf280886021b557d',
 };
 
 class TransportError extends Error {
@@ -63,7 +59,15 @@ function point(params, prefix = '') {
   return [lng, lat];
 }
 async function json(url, init) {
-  const response = await fetch(url, { ...init, signal: AbortSignal.timeout(8000), redirect: 'error' });
+  let response;
+  try {
+    response = await fetch(url, { ...init, signal: AbortSignal.timeout(8000), redirect: 'error' });
+  } catch (error) {
+    if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+      throw new TransportError('upstream', '제공처 응답 시간이 초과되었어요. 잠시 후 다시 확인하세요.');
+    }
+    throw new TransportError('upstream', '제공처와 통신하지 못했어요.');
+  }
   if (!response.ok) {
     if (response.status === 429) throw new TransportError('quota', '조회 한도에 도달했어요. 잠시 후 다시 확인하세요.');
     if (response.status === 401 || response.status === 403) {

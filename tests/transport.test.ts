@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { carFor, decodeShare, encodeShare, legMinutes, makeRoute, makeStop, routeText, transitFor, walkingKey } from '../src/domain.ts';
 import { firstTransitStep, normalizeRouteName } from '../src/transport.ts';
-import { matchRouteArrivals, parseOdsayTransit, parseTmapPois, parseTmapReverseGeocode, parseTmapTransit, transportData } from '../server/transport.ts';
+import { matchRouteArrivals, parseOdsayTransit, parseTmapPois, parseTmapReverseGeocode, parseTmapTransit, transportData, TransportError } from '../server/transport.ts';
 
 test('normalizeRouteName and matchRouteArrivals match transit route numbers against station arrivals', () => {
   assert.equal(normalizeRouteName('간선:302'), '302');
@@ -167,5 +167,80 @@ test('parseTmapPois, parseTmapReverseGeocode and carFor support TMAP place searc
   const route = { ...makeRoute(), stops: [a, b] };
   assert.equal(carFor(a, b)?.minutes, 12);
   assert.equal(legMinutes(route, 0), 12);
+});
+
+test('transportData fails with unconfigured when provider API keys are absent', async () => {
+  const params = new URLSearchParams({
+    action: 'walk',
+    lng: '127.056',
+    lat: '37.545',
+    toLng: '127.060',
+    toLat: '37.548',
+  });
+  await assert.rejects(
+    () => transportData(params, { TMAP_FREE_PLAN_CONFIRMED: 'true' }, async () => {
+      throw new Error('fetch should not be called without an API key');
+    }),
+    (err: unknown) => err instanceof TransportError && err.code === 'unconfigured',
+  );
+});
+
+test('transportData distinguishes HTTP 429 quota and 401 unconfigured upstream errors', async () => {
+  const poiParams = new URLSearchParams({ action: 'pois', q: '강남역카페429' });
+  await assert.rejects(
+    () => transportData(
+      poiParams,
+      { TMAP_APP_KEY: 'test-key', TMAP_FREE_PLAN_CONFIRMED: 'true' },
+      async () => new Response('rate limited', { status: 429 }),
+    ),
+    (err: unknown) => err instanceof TransportError && err.code === 'quota',
+  );
+
+  const arrivalParams = new URLSearchParams({ action: 'arrivals', region: 'seoul', station: '04119' });
+  await assert.rejects(
+    () => transportData(
+      arrivalParams,
+      { SEOUL_BUS_SERVICE_KEY: 'test-key' },
+      async () => new Response('unauthorized', { status: 401 }),
+    ),
+    (err: unknown) => err instanceof TransportError && err.code === 'unconfigured',
+  );
+});
+
+test('transportData converts upstream fetch timeouts into upstream TransportError with AbortSignal', async () => {
+  let sawSignal = false;
+  const params = new URLSearchParams({ action: 'reverse-geocode', lng: '127.0551', lat: '37.5441' });
+  await assert.rejects(
+    () => transportData(
+      params,
+      { TMAP_APP_KEY: 'test-key', TMAP_FREE_PLAN_CONFIRMED: 'true' },
+      async (_input, init) => {
+        sawSignal = init?.signal instanceof AbortSignal;
+        throw new DOMException('The operation timed out.', 'TimeoutError');
+      },
+    ),
+    (err: unknown) => err instanceof TransportError && err.code === 'upstream',
+  );
+  assert.equal(sawSignal, true);
+});
+
+test('transportData deduplicates concurrent identical inflight upstream requests', async () => {
+  let fetchCount = 0;
+  const fakeFetch: typeof fetch = async () => {
+    fetchCount += 1;
+    await new Promise(resolve => setTimeout(resolve, 15));
+    return new Response(JSON.stringify({
+      searchPoiInfo: { pois: { poi: [{ id: 'p1', name: '성수 서점', noorLon: '127.056', noorLat: '37.545' }] } },
+    }), { status: 200 });
+  };
+  const params = new URLSearchParams({ action: 'pois', q: '성수역서점중복' });
+  const env = { TMAP_APP_KEY: 'test-key', TMAP_FREE_PLAN_CONFIRMED: 'true' };
+  const [first, second] = await Promise.all([
+    transportData(params, env, fakeFetch),
+    transportData(params, env, fakeFetch),
+  ]) as [{ name: string }[], { name: string }[]];
+  assert.equal(fetchCount, 1);
+  assert.equal(first[0].name, '성수 서점');
+  assert.equal(second[0].name, '성수 서점');
 });
 
