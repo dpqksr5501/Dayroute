@@ -3,7 +3,10 @@ import type { Category, Stop, TransitLeg, TransitStep, WalkingLeg } from './doma
 export type TransportCode = 'unconfigured' | 'unsupported' | 'quota' | 'upstream' | 'offline' | 'invalid';
 export class TransportError extends Error {
   code: TransportCode;
-  constructor(code: TransportCode, message: string) { super(message); this.code = code; }
+  retryAfter?: number;
+  constructor(code: TransportCode, message: string, retryAfter?: number) {
+    super(message); this.code = code; this.retryAfter = retryAfter;
+  }
 }
 export interface BusStation { id: string; name: string; region: 'seoul' | 'gyeonggi'; number?: string; distance?: number; lng?: number; lat?: number }
 export interface BusArrival { route: string; direction: string; first: string; second: string; stopsAway?: number }
@@ -19,6 +22,7 @@ export interface TransportStatus {
   walking: boolean; walkingMap: boolean;
   car: boolean; pois: boolean;
   transit: boolean; transitMap: boolean;
+  transitSharedBudget: boolean;
   seoul: boolean; gyeonggi: boolean; subway: boolean;
 }
 const cache = new Map<string, { until: number; data: unknown }>();
@@ -28,9 +32,10 @@ interface PendingTransport {
   subscribers: number;
 }
 const inflight = new Map<string, PendingTransport>();
+let transitCooldown: { until: number; error: TransportError } | undefined;
 const cacheLifetimes: Record<string, number> = {
   walk: 3600000, car: 3600000, 'reverse-geocode': 3600000,
-  transit: 1800000, pois: 1800000, stations: 300000,
+  transit: 1800000, pois: 1800000, stations: 300000, status: 120000,
 };
 
 async function loadTransport(query: string, signal: AbortSignal): Promise<unknown> {
@@ -43,7 +48,11 @@ async function loadTransport(query: string, signal: AbortSignal): Promise<unknow
   }
   let body: { data?: unknown; code?: TransportCode; message?: string };
   try { body = await response.json(); } catch { throw new TransportError('upstream', '교통 서버에 연결하지 못했어요.'); }
-  if (!response.ok || body.data === undefined) throw new TransportError(body.code || 'upstream', body.message || '정보를 가져오지 못했어요.');
+  if (!response.ok || body?.data === undefined) {
+    const retry = Number(response.headers.get('Retry-After'));
+    throw new TransportError(body?.code || 'upstream', body?.message || '정보를 가져오지 못했어요.',
+      response.status === 429 && Number.isInteger(retry) && retry > 0 ? Math.min(86400, retry) : undefined);
+  }
   return body.data;
 }
 
@@ -55,6 +64,7 @@ export async function transportRequest<T>(params: Record<string, string>, signal
   const hit = cache.get(query);
   if (hit && hit.until > Date.now()) return hit.data as T;
   if (!navigator.onLine) throw new TransportError('offline', '오프라인이에요. 연결 후 다시 조회하세요.');
+  if (params.action === 'transit' && transitCooldown && transitCooldown.until > Date.now()) throw transitCooldown.error;
 
   let request = inflight.get(query);
   if (!request) {
@@ -69,6 +79,12 @@ export async function transportRequest<T>(params: Record<string, string>, signal
       }
       cache.set(query, { until: Date.now() + ttl, data });
       return data;
+    }).catch(error => {
+      if (params.action === 'transit' && error instanceof TransportError && error.code === 'quota' && error.retryAfter) {
+        const until = Date.now() + error.retryAfter * 1000;
+        if (!transitCooldown || until > transitCooldown.until) transitCooldown = { until, error };
+      }
+      throw error;
     }).finally(() => {
       if (inflight.get(query)?.controller === controller) inflight.delete(query);
     });

@@ -37,6 +37,7 @@ export default function App() {
   const notify = (message: string) => setToast(message);
   const saveStatus = !library.ready ? '보관함 불러오는 중' : library.pending ? '브라우저에 저장하는 중'
     : library.issue ? '저장 확인 필요' : !online ? '오프라인' : library.stored ? '브라우저에 저장됨' : '예시 코스';
+  const storageNotice = library.issue || (library.legacyChanged ? '이전 버전의 탭에서 코스가 바뀌었어요. 설정에서 이전 저장본을 백업할 수 있어요.' : '');
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 4500); return () => clearTimeout(t); }, [toast]);
   useEffect(() => {
     const net = () => setOnline(navigator.onLine);
@@ -99,7 +100,7 @@ export default function App() {
           {history.length > 0 && <button className="icon-button" aria-label="실행 취소" onClick={undo}><Undo2 size={18} /></button>}
           <button className="avatar" aria-label="설정과 데이터 열기" onClick={() => setModal('settings')}>D</button></div>
       </header>
-      {(library.issue || notice) && <div className="notice" role="alert"><span>{library.issue || notice}</span><button className="text-button" onClick={() => setModal('settings')}>설정 열기</button>{!library.issue && <button className="icon-button" aria-label="안내 닫기" onClick={() => setNotice('')}><X size={16} /></button>}</div>}
+      {(storageNotice || notice) && <div className="notice" role="alert"><span>{storageNotice || notice}</span><button className="text-button" onClick={() => setModal('settings')}>설정 열기</button>{!storageNotice && <button className="icon-button" aria-label="안내 닫기" onClick={() => setNotice('')}><X size={16} /></button>}</div>}
       {release.available && <div className="update-banner"><Sparkles size={17} /><span>새 버전이 준비됐어요. 코스를 저장한 뒤 업데이트할 수 있어요.</span><button className="text-button" onClick={async () => {
         if (!library.ready || !await library.flush()) { notify('먼저 코스를 백업하고 저장 상태를 확인해 주세요.'); return; }
         if (!(await release.apply())) notify('업데이트를 받지 못했어요. 인터넷 연결을 확인해 주세요.');
@@ -134,6 +135,7 @@ export default function App() {
     {modal === 'settings' && <Modal title="설정과 데이터" onClose={() => setModal(null)}>
       <div className="settings-section"><h3>데이터</h3><p>이 브라우저에 저장돼요. 기기를 바꾸거나 데이터를 지우기 전에 백업하세요.</p><div className="button-row"><button className="secondary" disabled={!library.ready} onClick={() => downloadBackup(library.current())}><ArrowDownToLine size={17} /> 전체 백업</button><button className="secondary" disabled={!library.ready || library.pending} onClick={() => importInput.current?.click()}><ArrowUpFromLine size={17} /> 파일 가져오기</button></div>
         {(library.conflict || (library.dirty && !library.pending)) && <button className="text-button" onClick={() => { downloadBackup(library.current()); library.discardDraft(); location.reload(); }}>이 탭을 백업하고 최신 보관함 불러오기</button>}
+        {library.stored && <button className="text-button" onClick={() => notify(library.backupLegacy())}>이전 버전 저장본 백업</button>}
       </div>
       <div className="settings-section"><h3>앱처럼 사용하기</h3><p>휴대폰 브라우저 메뉴에서 ‘홈 화면에 추가’를 선택하세요. 실행하거나 화면으로 돌아왔을 때 새 버전을 확인해요. 지도는 인터넷 연결이 필요해요.</p><span className="version-label">v{__APP_RELEASE__.version} · {import.meta.env.DEV ? '개발 미리보기' : '웹앱'} · {online ? '온라인' : '오프라인'}{release.offlineReady ? ' · 앱 화면 오프라인 준비 완료' : ''}</span><button className="text-button" onClick={() => void release.check()}>새 버전 확인</button><span className="version-label" role="status">{release.lastCheck}</span></div>
       <div className="settings-section"><h3>지도와 장소 정보</h3><p>무료 지도: MapLibre · OpenFreeMap · OpenStreetMap. 지도 화면을 열 때 표시 영역이 지도 제공자에게 요청돼요. 실사 3D·실시간 영업시간·도로 경로 자동 계산은 아직 연결하지 않았어요. 기본 장소 위치는 예시이므로 방문 전에 원문 지도를 확인해 주세요.</p><a href="https://openfreemap.org/" target="_blank" rel="noreferrer" className="inline-link">지도 제공 안내 <ExternalLink size={13} /></a></div>

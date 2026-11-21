@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowDown, ArrowUp, Check, Clock3, Coffee, Copy, ExternalLink, GripVertical, LocateFixed, MapPin,
   Plus, Play, Share2, Trash2, Utensils, Trees, Palette, ShoppingBag, ChevronDown, CalendarDays, BusFront, Navigation, Pencil, RefreshCw } from 'lucide-react';
 import { carFor, formatDuration, hasCoordinates, roadPreviewKey, schedule, totalMinutes, walkingFor, walkingKey, type Category, type Route, type Stop, type TransitLeg } from '../domain';
-import { carParams, kakaoDirections, naverDirections, reverseGeocodeParams, transportRequest, walkingParams, type WalkingResult } from '../transport';
+import { carParams, kakaoDirections, naverDirections, reverseGeocodeParams, transportRequest, walkingParams, type TransportStatus, type WalkingResult } from '../transport';
 import type { UserLocation } from './MapView';
 import PlacePicker from './PlacePicker';
 import RouteCover from './RouteCover';
@@ -92,9 +92,11 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
   useEffect(() => {
     if (!mapVisible || !roadQuery || roadAlreadySaved || roadAlreadyLoaded) return;
     const controller = new AbortController();
-    void transportRequest<WalkingResult>(Object.fromEntries(new URLSearchParams(roadQuery)), controller.signal)
+    void transportRequest<TransportStatus>({ action: 'status' }, controller.signal)
+      .then(status => status.walking && status.walkingMap && !controller.signal.aborted
+        ? transportRequest<WalkingResult>(Object.fromEntries(new URLSearchParams(roadQuery)), controller.signal) : undefined)
       .then(result => {
-        if (!controller.signal.aborted) setRoadCoordinates(previous => ({
+        if (result && !controller.signal.aborted) setRoadCoordinates(previous => ({
           ...Object.fromEntries(Object.entries(previous).slice(-99)), [roadKey]: result.coordinates,
         }));
       }).catch(() => {});

@@ -522,7 +522,7 @@ export function matchRouteArrivals(arrivals: BusArrival[], targetRoute: string):
   return { matched, others };
 }
 function cleanStationName(raw: string): string {
-  return raw.replace(/역$/, '').replace(/\(.*\)/g, '').trim();
+  return raw.normalize('NFC').trim().replace(/\s*역$/, '').replace(/\s*\([^()]*\)$/, '').replace(/\s*역$/, '');
 }
 const GYEONGGI_CITIES: [string, number, number][] = [
   ['수원시', 127.015, 37.282], ['성남시', 127.126, 37.400], ['고양시', 126.775, 37.658], ['용인시', 127.177, 37.241],
@@ -614,6 +614,20 @@ function busArrivals(region: 'seoul' | 'gyeonggi', id: string, apiKey: string, f
   });
 }
 
+async function subwayLive(params: URLSearchParams, env: Env, fetcher: typeof fetch): Promise<TransitLiveResult> {
+  const station = cleanStationName(str(params.get('stationName')));
+  if (!station) throw new TransportError('invalid', '지하철 역 이름을 확인해 주세요.');
+  const subwayKey = required(env, 'SEOUL_SUBWAY_SERVICE_KEY');
+  const { arrivals, fetchedAt } = await cachedTransport(`subway:${station}`, 30000, async () => {
+    consume('subway');
+    const body = await json(`http://swopenAPI.seoul.go.kr/api/subway/${encodeURIComponent(subwayKey)}/json/realtimeStationArrival/0/20/${encodeURIComponent(station)}`, {}, fetcher);
+    return { arrivals: parseSubwayArrivals(body), fetchedAt: new Date().toISOString() };
+  });
+  const route = str(params.get('route'));
+  const { matched, others } = matchRouteArrivals(arrivals, route || str(params.get('direction')));
+  return { stationName: `${station}역`, route, matched, others: others.slice(0, 8), fetchedAt, source: '서울 실시간 지하철' };
+}
+
 const ALLOWED_QUERY_KEYS = ['action', 'direction', 'lat', 'lng', 'mode', 'q', 'region', 'route', 'station', 'stationName', 'stationPoint', 'toLat', 'toLng'] as const;
 
 function normalizedCacheKey(params: URLSearchParams): string {
@@ -671,8 +685,8 @@ export async function transportData(params: URLSearchParams, env: Env = process.
   if (!['walk', 'car', 'pois', 'reverse-geocode', 'transit', 'transit-live', 'stations', 'arrivals'].includes(action || '')) {
     throw new TransportError('invalid', '지원하지 않는 조회예요.');
   }
-  const cacheKey = normalizedCacheKey(params);
   if (action === 'walk' || action === 'car') return tmapRoadRoute(action, params, env, fetcher);
+  if (action === 'transit-live' && params.get('mode') === 'subway') return subwayLive(params, env, fetcher);
   const run = async () => {
     if (action === 'pois') {
       const apiKey = required(env, 'TMAP_APP_KEY');
@@ -727,19 +741,8 @@ export async function transportData(params: URLSearchParams, env: Env = process.
       throw new TransportError('unconfigured', '대중교통 경로 API 요금제 확인 후 연결할 수 있어요.');
     }
     if (action === 'transit-live') {
-      const mode = params.get('mode') || 'bus';
       const targetRoute = str(params.get('route'));
       const stationName = str(params.get('stationName'));
-      if (mode === 'subway') {
-        const subwayKey = required(env, 'SEOUL_SUBWAY_SERVICE_KEY');
-        const cleanName = cleanStationName(stationName);
-        if (!cleanName) throw new TransportError('invalid', '지하철 역 이름을 확인해 주세요.');
-        consume('subway');
-        const body = await json(`http://swopenAPI.seoul.go.kr/api/subway/${encodeURIComponent(subwayKey)}/json/realtimeStationArrival/0/20/${encodeURIComponent(cleanName)}`, {}, fetcher);
-        const arrivals = parseSubwayArrivals(body);
-        const { matched, others } = matchRouteArrivals(arrivals, targetRoute || str(params.get('direction')));
-        return { stationName: `${cleanName}역`, route: targetRoute, matched, others: others.slice(0, 8), fetchedAt: new Date().toISOString(), source: '서울 실시간 지하철' } satisfies TransitLiveResult;
-      }
       const region = params.get('region') === 'gyeonggi' ? 'gyeonggi' : 'seoul';
       const arrivalApiKey = required(env, region === 'seoul' ? 'SEOUL_BUS_SERVICE_KEY' : 'GYEONGGI_BUS_SERVICE_KEY');
       let stationId = str(params.get('station'));
@@ -781,10 +784,9 @@ export async function transportData(params: URLSearchParams, env: Env = process.
     if (!(region === 'seoul' ? /^\d{5}$/ : /^\d{9}$/).test(id)) throw new TransportError('invalid', region === 'seoul' ? '정류소 번호 5자리를 확인하세요.' : '경기 정류소 ID 9자리를 확인하세요. 표지판 번호와 달라요.');
     return busArrivals(region, id, apiKey, fetcher);
   };
-  const ttl = action === 'reverse-geocode' ? 3600000
-    : action === 'transit' || action === 'pois' ? 1800000
-    : action === 'stations' ? 300000 : 30000;
-  return action === 'arrivals' || action === 'stations' ? run() : cachedTransport(cacheKey, ttl, run);
+  if (action === 'arrivals' || action === 'stations') return run();
+  const ttl = action === 'reverse-geocode' ? 3600000 : action === 'transit' || action === 'pois' ? 1800000 : 30000;
+  return cachedTransport(normalizedCacheKey(params), ttl, run);
 }
 export async function handleTransport(req: IncomingMessage, res: ServerResponse, env: Env = { ...DEFAULT_ENV, ...process.env }) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');

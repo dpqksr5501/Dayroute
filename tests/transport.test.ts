@@ -205,6 +205,58 @@ test('a cancelled browser view leaves a shared request available to another view
   assert.equal(fetchMock.mock.callCount(), 1);
 });
 
+test('the browser honors transit Retry-After across legs and still serves cached routes and arrivals', async t => {
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+  t.after(() => {
+    if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  });
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const mock = t.mock.method(globalThis, 'fetch', async (input: string) => {
+    const params = new URL(input, 'https://dayroute.test').searchParams;
+    if (params.get('lng') === '127.06') {
+      return Response.json({ code: 'quota', message: '조회 한도에 도달했어요.' }, { status: 429, headers: { 'Retry-After': '60' } });
+    }
+    return Response.json({ data: 'ok' });
+  });
+  const signal = new AbortController().signal;
+  const transit = { action: 'transit', lng: '127.05' };
+  assert.equal(await transportRequest(transit, signal), 'ok');
+  await assert.rejects(transportRequest({ ...transit, lng: '127.06' }, signal), /조회 한도/);
+  await assert.rejects(transportRequest({ ...transit, lng: '127.07' }, signal), /조회 한도/);
+  assert.equal(await transportRequest(transit, signal), 'ok');
+  assert.equal(mock.mock.callCount(), 2);
+  assert.equal(await transportRequest({ action: 'arrivals', station: '04862', region: 'seoul' }, signal), 'ok');
+  now += 60001;
+  assert.equal(await transportRequest({ ...transit, lng: '127.07' }, signal), 'ok');
+  assert.equal(mock.mock.callCount(), 4);
+});
+
+test('different subway lines share one provider read for the same normalized station', async () => {
+  let calls = 0;
+  const fakeFetch: typeof fetch = async input => {
+    calls++;
+    assert.ok(String(input).endsWith(`/${encodeURIComponent('검증환승')}`));
+    return Response.json({ realtimeArrivalList: [
+      { subwayId: '1002', trainLineNm: '2호선 방면', arvlMsg2: '2분 후' },
+      { subwayId: '1006', trainLineNm: '6호선 방면', arvlMsg2: '5분 후' },
+    ] });
+  };
+  const env = { SEOUL_SUBWAY_SERVICE_KEY: 'test-key' };
+  const query = (stationName: string, route: string) => new URLSearchParams({ action: 'transit-live', mode: 'subway', stationName, route });
+  const [first, next] = await Promise.all([
+    transportData(query('검증환승역(2호선)', '2호선'), env, fakeFetch),
+    transportData(query('검증환승(환승)역', '6호선'), env, fakeFetch),
+  ]) as { stationName: string; fetchedAt: string; matched: { route: string; first: string }[] }[];
+  assert.equal(calls, 1);
+  assert.equal(first.stationName, '검증환승역');
+  assert.equal(first.fetchedAt, next.fetchedAt);
+  assert.equal(first.matched[0].route, '2호선');
+  assert.equal(next.matched[0].first, '5분 후');
+});
+
 test('the provider response limit rejects an oversized body before parsing', async () => {
   const oversized = new Uint8Array(4_000_001);
   await assert.rejects(transportData(

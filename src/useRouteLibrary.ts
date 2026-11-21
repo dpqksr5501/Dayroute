@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Route } from './domain';
-import { loadRoutes, saveRoutes, type LibrarySnapshot, type SaveResult } from './storage';
+import { downloadLibraryFile, loadRoutes, saveRoutes, STORAGE_KEY, type LibrarySnapshot, type SaveResult } from './storage';
 
 export function useRouteLibrary() {
   const [routes, setRoutes] = useState<Route[]>([]);
@@ -9,6 +9,7 @@ export function useRouteLibrary() {
   const [stored, setStored] = useState(false);
   const [issue, setIssue] = useState('');
   const [conflict, setConflict] = useState(false);
+  const [legacyChanged, setLegacyChanged] = useState(false);
   const saved = useRef<LibrarySnapshot>({ routes: [], revision: null });
   const desired = useRef(saved.current.routes);
   const writer = useRef<Promise<boolean> | null>(null);
@@ -36,10 +37,17 @@ export function useRouteLibrary() {
       if (saved.current.revision === event.data || writer.current) return;
       setIssue('다른 탭에서 보관함을 수정했어요. 최신 내용을 보려면 새로고침하세요.');
     };
+    const watchLegacy = (event: StorageEvent) => {
+      if (saved.current.revision && event.key === STORAGE_KEY && event.newValue !== null && event.storageArea === localStorage) {
+        setLegacyChanged(true);
+      }
+    };
+    window.addEventListener('storage', watchLegacy);
     return () => {
       active = false;
       broadcast?.close();
       channel.current = null;
+      window.removeEventListener('storage', watchLegacy);
     };
   }, []);
 
@@ -82,7 +90,11 @@ export function useRouteLibrary() {
       while (desired.current !== saved.current.routes) {
         const next = desired.current;
         const result = await saveRoutes(next, saved.current);
-        if (!result.ok) { fail(result.reason); return false; }
+        if (!result.ok) {
+          if (result.reason === 'invalid' && desired.current !== next) continue;
+          fail(result.reason);
+          return false;
+        }
         publish({ routes: next, revision: result.revision }, result.revision);
       }
       return true;
@@ -111,12 +123,7 @@ export function useRouteLibrary() {
       const next = [...imported, ...latest.routes];
       if (next.length > 500) throw new Error('보관함에는 최대 500개 코스를 저장할 수 있어요.');
       if (latest.error && typeof latest.legacyRaw === 'string') {
-        const url = URL.createObjectURL(new Blob([latest.legacyRaw], { type: 'application/json' }));
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = 'dayroute-recovery-original.json';
-        link.click();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        downloadLibraryFile(latest.legacyRaw, 'dayroute-recovery-original.json');
       }
       const result = await saveRoutes(next, latest);
       if (!result.ok) throw new Error('보관함이 바뀌었거나 저장 공간이 부족해 가져오지 못했어요.');
@@ -130,7 +137,17 @@ export function useRouteLibrary() {
     } finally { restoring.current = false; setPending(false); }
   };
 
-  return { routes, ready, pending, stored, issue, conflict, commit, flush, restore, dirty,
+  const backupLegacy = () => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw === null) return '이전 버전에서 저장한 코스가 없어요.';
+      downloadLibraryFile(raw, 'dayroute-legacy-library.json');
+      setLegacyChanged(false);
+      return '이전 버전의 저장본을 내려받았어요.';
+    } catch { return '이전 저장본을 읽지 못했어요.'; }
+  };
+
+  return { routes, ready, pending, stored, issue, conflict, commit, flush, restore, dirty, legacyChanged, backupLegacy,
     current: () => desired.current,
     discardDraft: () => { desired.current = saved.current.routes; },
   };

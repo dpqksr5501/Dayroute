@@ -119,10 +119,14 @@ export async function saveRoutes(routes: Route[], previous: LibrarySnapshot): Pr
     return { ok: false, reason: 'unavailable' };
   }
 }
+export function downloadLibraryFile(raw: string, name: string) {
+  const url = URL.createObjectURL(new Blob([raw], { type: 'application/json' }));
+  const a = document.createElement('a'); a.href = url; a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 export function downloadBackup(routes: Route[]) {
-  const url = URL.createObjectURL(new Blob([JSON.stringify({ schemaVersion: 1, routes }, null, 2)], { type: 'application/json' }));
   const today = new Date();
   const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-  const a = document.createElement('a'); a.href = url; a.download = `dayroute-${date}.json`; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  downloadLibraryFile(JSON.stringify({ schemaVersion: 1, routes }, null, 2), `dayroute-${date}.json`);
 }
