@@ -1,0 +1,191 @@
+.candidate-filters {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 4px 2px 8px;
+  scrollbar-width: thin;
+}
+
+.candidate-filters button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  min-height: 40px;
+  padding: 5px 10px;
+  border: 1px solid #d9e3d8;
+  border-radius: 8px;
+  background: #fff;
+  color: #455d4d;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.candidate-filters button[aria-pressed='true'] {
+  border-color: #315e4c;
+  background: #315e4c;
+  color: #fff;
+}
+
+.candidate-filters button span {
+  opacity: .88;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.candidate-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid #e5ebe4;
+}
+
+.candidate-context {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  font-size: 11px;
+  color: #53685a;
+}
+
+.candidate-context strong { color: #2c4c39; font-size: 12px; }
+
+.candidate-sort, .candidate-leg-select {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: #455d4d;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.candidate-leg-select { flex: 1; }
+.candidate-leg-select span { flex: none; }
+.candidate-leg-select select { width: 100%; text-overflow: ellipsis; }
+
+.candidate-sort select, .candidate-leg-select select {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 38px;
+  padding: 4px 8px;
+  border: 1px solid #d6dfd5;
+  border-radius: 7px;
+  background: #fff;
+  color: #2e4939;
+  font: inherit;
+}
+
+.candidate-empty, .map-candidate-message {
+  margin: 0;
+  padding: 12px;
+  background: #f8faf7;
+  color: #455d4d;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.transit-options-panel { padding: 6px 0; }
+.map-drawer-body { min-height: 0; overscroll-behavior: contain; }
+.map-transit-drawer { min-height: 0; flex-shrink: 1; }
+.map-leg-chip { min-height: 40px; }
+.map-leg-chip:disabled { opacity: .55; }
+.map-drawer-title { overflow: hidden; }
+.map-drawer-title svg { flex: none; }
+.map-drawer-foot { align-items: flex-start; }
+.map-drawer-foot a { min-height: 32px; }
+
+.candidate-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+.candidate-badge, .candidate-applied {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #315e4c;
+  font-size: 11px;
+  font-weight: 700;
+}
+.candidate-applied { color: #355d78; }
+.nv-time-row { gap: 4px 10px; }
+.nv-arrival-clock, .nv-fare { font-size: 12px; }
+.nv-select-btn, .nv-arrival-btn, .nv-detail-toggle { min-height: 40px; }
+.nv-card-head .nv-select-btn { flex: none; }
+.nv-card-foot { flex-wrap: wrap; }
+.nv-foot-meta { color: #53685a; margin-right: auto; }
+.nv-expanded-steps[hidden] { display: none; }
+.nv-expanded-steps li { flex-wrap: wrap; }
+
+.nv-progress-bar { height: 22px; border-radius: 5px; gap: 2px; }
+.nv-bar-seg {
+  flex-basis: 0;
+  min-width: 0;
+  padding: 0 2px;
+  border-radius: 3px;
+  text-overflow: ellipsis;
+}
+.nv-bar-seg svg { flex: none; }
+.nv-bar-seg.mode-bus { background: #3c7148; border-radius: 3px; }
+.nv-bar-seg.mode-subway, .nv-bar-seg.mode-train { background: #365d86; border-radius: 3px; }
+.nv-bar-seg.mode-walk { background: #e9eeeb; color: #455d4d; }
+
+.candidate-boarding {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.candidate-boarding > li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+.candidate-line {
+  flex: none;
+  max-width: 37%;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: #e6f0e7;
+  color: #315e4c;
+  font-size: 11px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.candidate-line.mode-subway, .candidate-line.mode-train { background: #e9f0f7; color: #2b5077; }
+.candidate-stations { flex: 1; min-width: 0; }
+.candidate-stations p, .candidate-arrival-note {
+  margin: 0;
+  color: #324d3e;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.candidate-arrivals { margin-top: 2px; }
+.candidate-arrivals .nv-arrival-btn { padding: 2px 7px; color: #355d78; font-size: 11px; }
+.candidate-arrival-times {
+  display: grid;
+  gap: 6px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.candidate-arrival-times li { display: flex; align-items: baseline; flex-wrap: wrap; gap: 3px 8px; color: #2c4c39; font-size: 12px; }
+.candidate-arrival-times li strong { color: #315e4c; }
+.candidate-arrival-times li small { color: #53685a; }
+
+@media (max-width: 760px) {
+  .map-drawer-body { max-height: min(40dvh, 310px); }
+  .map-drawer-head { padding-inline: 12px; }
+  .map-drawer-title strong { white-space: normal; overflow-wrap: anywhere; }
+  .nv-candidate-card { padding: 11px; }
+  .nv-card-head { gap: 6px; }
+  .candidate-filters button { min-height: 44px; }
+}

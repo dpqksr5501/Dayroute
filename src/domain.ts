@@ -26,6 +26,7 @@ export interface TransitStep {
 export interface TransitLeg {
   key: string; summary: string; minutes: number; transfers: number;
   walkMinutes: number; fare?: number; fetchedAt: string;
+  provider?: 'tmap' | 'odsay';
   steps: TransitStep[]; coordinates: [number, number][];
 }
 export interface Route {
@@ -53,6 +54,9 @@ export function copyRoute(route: Route): Route {
 }
 export function walkingKey(from: Stop, to: Stop): string {
   return `${from.lng},${from.lat}>${to.lng},${to.lat}`;
+}
+export function roadPreviewKey(from: Stop, to: Stop): string {
+  return `${from.mode}:${walkingKey(from, to)}`;
 }
 export function walkingFor(from: Stop, to: Stop | undefined): WalkingLeg | undefined {
   return to && from.mode === 'walk' && hasCoordinates(from) && hasCoordinates(to)
@@ -146,6 +150,7 @@ export function validTransitStep(v: unknown): v is TransitStep {
 }
 export function validTransit(v: unknown): v is TransitLeg {
   return obj(v) && str(v.key, 150) && str(v.summary, 160)
+    && (v.provider === undefined || v.provider === 'tmap' || v.provider === 'odsay')
     && num(v.minutes, 0, 1440) && Number.isInteger(v.minutes)
     && num(v.transfers, 0, 20) && Number.isInteger(v.transfers)
     && num(v.walkMinutes, 0, 1440) && Number.isInteger(v.walkMinutes)

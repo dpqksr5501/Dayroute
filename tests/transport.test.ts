@@ -2,8 +2,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { carFor, decodeShare, encodeShare, legMinutes, makeRoute, makeStop, routeText, transitFor, walkingKey } from '../src/domain.ts';
-import { firstTransitStep, normalizeRouteName } from '../src/transport.ts';
-import { handleTransport, matchRouteArrivals, parseOdsayTransit, parseTmapPois, parseTmapReverseGeocode, parseTmapTransit, transportData, TransportError } from '../server/transport.ts';
+import { firstTransitStep, normalizeRouteName, type TransitOption } from '../src/transport.ts';
+import { originLegId, sortTransitOptions, transitArrivalTime, transitCategory, transitDepartureTime, transitLegs } from '../src/transitCandidates.ts';
+import handler, { handleTransport, matchRouteArrivals, parseOdsayTransit, parseSubwayArrivals, parseTmapPois, parseTmapReverseGeocode, parseTmapTransit, transportData, TransportError } from '../api/transport.ts';
 
 test('normalizeRouteName and matchRouteArrivals match transit route numbers against station arrivals', () => {
   assert.equal(normalizeRouteName('간선:302'), '302');
@@ -12,12 +13,13 @@ test('normalizeRouteName and matchRouteArrivals match transit route numbers agai
   const arrivals = [
     { route: '2224', direction: '건대입구', first: '2분 후', second: '9분 후' },
     { route: '302', direction: '잠실역', first: '4분 후', second: '12분 후', stopsAway: 2 },
+    { route: '3020', direction: '다른 방면', first: '1분 후', second: '9분 후' },
   ];
   const { matched, others } = matchRouteArrivals(arrivals, '간선:302');
   assert.equal(matched.length, 1);
   assert.equal(matched[0].route, '302');
   assert.equal(matched[0].first, '4분 후');
-  assert.equal(others.length, 1);
+  assert.equal(others.length, 2);
   assert.equal(others[0].route, '2224');
 });
 
@@ -49,9 +51,13 @@ test('parseTmapTransit normalizes multi-leg itineraries and respects mapAllowed 
   assert.equal(restricted.options[0].coordinates.length, 0);
   assert.equal(firstTransitStep(restricted.options[0])?.route, '간선:302');
   assert.equal(firstTransitStep(restricted.options[0])?.stops, 2);
+  assert.equal(firstTransitStep(restricted.options[0])?.stationId, undefined);
 
   const allowed = parseTmapTransit(sample, key, true);
   assert.ok(allowed.options[0].coordinates.length >= 4);
+  assert.equal(allowed.options[0].provider, 'tmap');
+  assert.equal(allowed.options[0].steps[1].coordinates?.length, 3);
+  assert.equal(restricted.options[0].steps[1].coordinates, undefined);
 });
 
 test('parseOdsayTransit normalizes ODSay subPaths and station metadata', () => {
@@ -101,7 +107,7 @@ test('transit-live stitches boarding station lookup with live arrival matching',
     mode: 'bus',
     region: 'seoul',
     route: '간선:302',
-    stationName: '성수역',
+    stationName: '성수역 3번 출구',
     lng: '127.056',
     lat: '37.545',
   });
@@ -115,6 +121,71 @@ test('transit-live stitches boarding station lookup with live arrival matching',
   assert.equal(res.matched[0].route, '302');
   assert.equal(res.others.length, 1);
   assert.equal(res.others[0].route, '2016');
+
+  params.set('stationName', '다른 정류소');
+  await assert.rejects(transportData(params, { SEOUL_BUS_SERVICE_KEY: 'test-key' }, fakeFetch),
+    (error: unknown) => error instanceof TransportError && error.code === 'unsupported');
+  assert.equal(calls.length, 3);
+});
+
+test('subway arrivals use the line ID and keep the provider direction', () => {
+  const arrivals = parseSubwayArrivals({ realtimeArrivalList: [
+    { subwayId: 1002, trainLineNm: '성수행', updnLine: '내선', arvlMsg2: '3분 후' },
+    { subwayId: 1063, trainLineNm: '문산행', arvlMsg2: '5분 후' },
+  ] });
+  const { matched } = matchRouteArrivals(arrivals, '수도권 2호선');
+  assert.deepEqual(matched.map(({ route, direction, first }) => ({ route, direction, first })),
+    [{ route: '2호선', direction: '성수행', first: '3분 후' }]);
+});
+
+test('the deployment entry point does not suggest bus routes with only an arrival provider configured', async t => {
+  const keys = ['TMAP_APP_KEY', 'ODSAY_API_KEY', 'SEOUL_BUS_SERVICE_KEY'];
+  const previous = keys.map(key => process.env[key]);
+  delete process.env.TMAP_APP_KEY;
+  delete process.env.ODSAY_API_KEY;
+  process.env.SEOUL_BUS_SERVICE_KEY = 'test-key';
+  const upstream = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Unexpected provider call'); });
+  let body = '';
+  const req = { method: 'GET', url: '/api/transport?action=transit&lng=127.01&lat=37.52&toLng=127.03&toLat=37.55', headers: {} } as IncomingMessage;
+  const res = { setHeader() {}, end(value: string) { body = value; } } as unknown as ServerResponse;
+  try {
+    await handler(req, res);
+    assert.equal(res.statusCode, 503);
+    assert.equal(JSON.parse(body).code, 'unconfigured');
+    assert.equal(upstream.mock.callCount(), 0);
+  } finally {
+    keys.forEach((key, index) => {
+      if (previous[index] === undefined) delete process.env[key];
+      else process.env[key] = previous[index];
+    });
+  }
+});
+
+test('candidate categories use boarding modes and sorting keeps unknown fares after known fares', () => {
+  const option = (id: string, modes: TransitOption['steps'][number]['mode'][], minutes: number, fare?: number): TransitOption => ({
+    id, key: 'test', summary: id, minutes, fare, transfers: 0, walkMinutes: 0,
+    fetchedAt: '2026-11-21T00:20:00Z', steps: modes.map(mode => ({ mode, minutes: 1 })), coordinates: [],
+  });
+  const options = [option('bus', ['walk', 'bus'], 18, 1500), option('rail', ['subway', 'train'], 10),
+    option('mixed', ['bus', 'subway'], 15, 2000), option('walk', ['walk'], 29, 0)];
+  assert.deepEqual(options.map(transitCategory), ['bus', 'rail', 'mixed', 'walk']);
+  assert.deepEqual(sortTransitOptions(options, 'fare').map(item => item.id), ['walk', 'bus', 'mixed', 'rail']);
+  assert.deepEqual(sortTransitOptions(options, 'duration').map(item => item.id), ['rail', 'mixed', 'bus', 'walk']);
+  assert.equal(options[0].id, 'bus');
+  assert.equal(transitDepartureTime('2026-11-21T00:20:00Z'), '09:20');
+  assert.equal(transitArrivalTime('+1일 23:50', 20), '+2일 00:10');
+});
+
+test('the GPS leg points to the actual first stop and regular legs never cross a missing location', () => {
+  const first = makeStop({ name: '첫 장소' });
+  const second = makeStop({ name: '두 번째 장소', lng: 127.01, lat: 37.52 });
+  const third = makeStop({ name: '세 번째 장소', lng: 127.03, lat: 37.55 });
+  const location = { lng: 127.02, lat: 37.54 };
+  const legs = transitLegs([first, second, third], location, ['09:00', '10:00', '11:00']);
+  assert.deepEqual(legs.map(({ id, departure }) => [id, departure]), [[second.id, '10:00']]);
+  const withFirstPin = transitLegs([{ ...first, ...location }, second, third], location);
+  assert.equal(withFirstPin[0].id, originLegId);
+  assert.equal(withFirstPin[0].to.id, first.id);
 });
 
 test('domain schedule, share snapshot and routeText integrate saved transit legs', () => {

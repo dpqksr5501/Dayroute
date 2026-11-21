@@ -1,27 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
-import { BusFront, Car, ChevronDown, ExternalLink, Footprints, RefreshCw, TrainFront, X } from 'lucide-react';
-import { carFor, hasCoordinates, transitFor, walkingFor, type Stop, type TransitLeg, type TravelMode, type WalkingLeg } from '../domain';
+import { BusFront, Car, ChevronDown, ExternalLink, Footprints, TrainFront, X } from 'lucide-react';
+import { carFor, hasCoordinates, transitFor, walkingFor, type Stop, type TravelMode, type WalkingLeg } from '../domain';
 import {
-  arrivalFresh, carParams, firstTransitStep, kakaoDirections, naverDirections,
-  transitLiveParams, transitParams, transportRequest, walkingParams,
-  type TransitLiveResult, type TransitOption, type TransitRouteResult, type WalkingResult,
+  carParams, firstTransitStep, kakaoDirections, naverDirections, transitParams, transportRequest, walkingParams,
+  type TransitOption, type TransitRouteResult, type WalkingResult,
 } from '../transport';
-import TransitCandidateCard from './TransitCandidateCard';
+import TransitOptions from './TransitOptions';
+import TransitArrivals from './TransitArrivals';
+import { savedTransitOption, transitIdentity, transitOptionPatch } from '../transitCandidates';
 
 const icons = { walk: Footprints, transit: TrainFront, car: Car };
 const names = { walk: '도보', transit: '대중교통', car: '자동차' };
 const stepLabels = { walk: '도보', bus: '버스', subway: '지하철', train: '열차' };
-
-function stripOption(opt: TransitOption): TransitLeg {
-  const { key, summary, minutes, transfers, walkMinutes, fare, fetchedAt, steps, coordinates } = opt;
-  return { key, summary, minutes, transfers, walkMinutes, ...(fare !== undefined ? { fare } : {}), fetchedAt, steps, coordinates };
-}
-function inferRegion(stop: Stop, routeRegion?: string, stepLng?: number, stepLat?: number): 'seoul' | 'gyeonggi' {
-  if (routeRegion?.includes('경기')) return 'gyeonggi';
-  const lng = stepLng ?? stop.lng, lat = stepLat ?? stop.lat;
-  if (lng !== null && lat !== null && (lng < 126.76 || lng > 127.19 || lat < 37.42 || lat > 37.70)) return 'gyeonggi';
-  return 'seoul';
-}
 
 export default function TravelLeg({ from, to, departure, region, readonly, onPatch, onBus }: {
   from: Stop; to: Stop; departure: string; region?: string; readonly: boolean;
@@ -30,30 +20,27 @@ export default function TravelLeg({ from, to, departure, region, readonly, onPat
   const [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const [viewWalk, setViewWalk] = useState<WalkingLeg | null>(null);
   const [viewCar, setViewCar] = useState<WalkingLeg | null>(null);
-  const [viewTransit, setViewTransit] = useState<TransitLeg | null>(null);
-  const [options, setOptions] = useState<TransitOption[]>([]);
-  const [live, setLive] = useState<TransitLiveResult | null>(null), [liveBusy, setLiveBusy] = useState(false), [liveError, setLiveError] = useState('');
-  const request = useRef<AbortController | null>(null), liveRequest = useRef<AbortController | null>(null);
+  const [result, setResult] = useState<TransitRouteResult>();
+  const request = useRef<AbortController | null>(null);
   const signature = `${from.lng},${from.lat}>${to.lng},${to.lat}:${from.mode}`;
 
   useEffect(() => {
-    setError(''); setLiveError(''); setViewWalk(null); setViewCar(null); setViewTransit(null); setOptions([]); setLive(null); setBusy(false); setLiveBusy(false);
-    return () => { request.current?.abort(); liveRequest.current?.abort(); };
+    setError(''); setViewWalk(null); setViewCar(null); setResult(undefined); setBusy(false);
+    return () => request.current?.abort();
   }, [signature]);
 
   const walk = walkingFor(from, to) || viewWalk;
   const car = carFor(from, to) || viewCar;
-  const transit = transitFor(from, to) || viewTransit;
-  const firstStep = firstTransitStep(transit ?? undefined);
+  const transit = transitFor(from, to);
+  const firstStep = firstTransitStep(transit);
+  const showSaved = transit && !result?.options.some(option => transitIdentity(option) === transitIdentity(transit));
   const Icon = icons[from.mode];
   const minutes = walk?.minutes ?? car?.minutes ?? transit?.minutes ?? from.travelMinutes;
   const badge = walk ? 'TMAP 도보' : car ? 'TMAP 자동차' : transit ? transit.summary : '직접 설정';
 
   const applyOption = (opt: TransitOption) => {
-    const leg = stripOption(opt);
-    setLive(null); setLiveError('');
-    if (readonly) setViewTransit(leg);
-    else if (!onPatch({ transit: leg, travelMinutes: leg.minutes })) setError('조회 결과를 저장하지 못했어요.');
+    const leg = savedTransitOption(opt);
+    if (!onPatch(transitOptionPatch(leg))) setError('조회 결과를 저장하지 못했어요.');
   };
   const queryRoad = async (mode: 'walk' | 'car') => {
     if (request.current && !request.current.signal.aborted && busy) return;
@@ -70,26 +57,15 @@ export default function TravelLeg({ from, to, departure, region, readonly, onPat
   };
   const queryTransit = async () => {
     if (request.current && !request.current.signal.aborted && busy) return;
-    const controller = new AbortController(); request.current = controller; setBusy(true); setError(''); setLive(null); setLiveError('');
+    const controller = new AbortController(); request.current = controller; setBusy(true); setError('');
     try {
       const data = await transportRequest<TransitRouteResult>(transitParams(from, to), controller.signal, 1800000);
       if (controller.signal.aborted) return;
-      setOptions(data.options);
-      if (data.options[0]) applyOption(data.options[0]);
+      setResult(data);
     } catch (e) { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : '대중교통 경로를 조회하지 못했어요.'); }
     finally { if (request.current === controller) setBusy(false); }
   };
-  const queryLive = async () => {
-    if (!firstStep || (liveRequest.current && !liveRequest.current.signal.aborted && liveBusy)) return;
-    const controller = new AbortController(); liveRequest.current = controller; setLiveBusy(true); setLiveError('');
-    try {
-      const reg = inferRegion(from, region, firstStep.fromLng, firstStep.fromLat);
-      const data = await transportRequest<TransitLiveResult>(transitLiveParams(firstStep, from, reg), controller.signal, 30000);
-      if (!controller.signal.aborted) setLive(data);
-    } catch (e) { if (!controller.signal.aborted) setLiveError(e instanceof Error ? e.message : '실시간 도착 정보를 가져오지 못했어요.'); }
-    finally { if (liveRequest.current === controller) setLiveBusy(false); }
-  };
-  const cancel = () => { request.current?.abort(); liveRequest.current?.abort(); setBusy(false); setLiveBusy(false); };
+  const cancel = () => { request.current?.abort(); setBusy(false); };
 
   return <div className="journey-leg">
     <button className="journey-summary" aria-expanded={open} onClick={() => { setOpen(!open); if (open) cancel(); }}>
@@ -112,21 +88,10 @@ export default function TravelLeg({ from, to, departure, region, readonly, onPat
           {busy && <button className="icon-button" aria-label="대중교통 조회 취소" onClick={cancel}><X size={17} /></button>}
         </div>
         {(!hasCoordinates(from) || !hasCoordinates(to)) && <p className="journey-source">두 장소의 지도 위치를 먼저 지정하세요.</p>}
-        {options.length > 0 && <div className="nv-candidate-list" role="group" aria-label="추천 대중교통 후보 경로">
-          {options.map((opt, idx) => {
-            const active = transit?.summary === opt.summary && transit?.minutes === opt.minutes;
-            return <TransitCandidateCard
-              key={opt.id}
-              option={opt}
-              index={idx}
-              selected={active}
-              actionLabel={active ? '적용됨' : '이 경로 선택'}
-              onSelect={() => applyOption(opt)}
-              onOpenArrivals={() => onBus()}
-            />;
-          })}
-        </div>}
-        {transit && <div className="transit-route-card" aria-label="선택된 대중교통 경로">
+        {result && <TransitOptions result={result} leg={{ id: from.id, label: to.name, from, to, departure }}
+          routeRegion={region} saved={transit} onApply={readonly ? undefined : applyOption} />}
+        {showSaved && <div className="transit-route-card" aria-label="저장된 대중교통 경로">
+          {!transit.provider && <p className="candidate-arrival-note">이전에 저장한 경로예요. 이동 전에 다시 조회해 주세요.</p>}
           <p className="transit-meta">
             <strong>{transit.summary}</strong> · 환승 {transit.transfers}회 · 도보 {transit.walkMinutes}분
             {transit.fare ? ` · ${transit.fare.toLocaleString('ko-KR')}원` : ''}
@@ -136,28 +101,12 @@ export default function TravelLeg({ from, to, departure, region, readonly, onPat
               <span className="step-badge">{s.route ? `${stepLabels[s.mode]} ${s.route}` : stepLabels[s.mode]}</span>
               <span className="step-body">
                 {s.from || s.to ? `${s.from || '출발'} → ${s.to || '도착'}` : '구간 이동'}
-                <small>{s.minutes}분{s.stops ? ` · ${s.stops}정류장` : s.meters ? ` · ${s.meters}m` : ''}{s.live ? ` · 실시간 ${s.live}` : ''}</small>
+                <small>{s.minutes}분{s.stops ? ` · ${s.stops}정류장` : s.meters ? ` · ${s.meters}m` : ''}</small>
               </span>
             </li>)}
           </ol>
-          {firstStep && <div className="transit-live-box">
-            <div className="transit-live-head">
-              <span>지금 출발 시 첫 탑승 · <strong>{firstStep.from || '승차 정류장'}</strong> ({firstStep.route || stepLabels[firstStep.mode]})</span>
-              <button type="button" className="text-button" disabled={liveBusy || (!!live && arrivalFresh(live))} onClick={() => void queryLive()}>
-                {liveBusy ? <span className="spinner" /> : <RefreshCw size={14} />}
-                {live ? '새로고침' : '실시간 도착 확인'}
-              </button>
-            </div>
-            {liveError && <p className="transport-error" role="status">{liveError}</p>}
-            {live && <div className="transit-live-result" role="status">
-              <small className="transit-live-source">{live.stationName}{live.stationNumber ? ` (${live.stationNumber})` : ''} · {live.source} 기준</small>
-              {live.matched.length > 0 ? live.matched.map((a, i) => <div className="transit-live-row matched" key={`${a.route}:${i}`}>
-                <strong>{a.route}</strong><span><strong>{a.first}</strong> · 다음 {a.second}{a.stopsAway ? ` (${a.stopsAway}정류장 전)` : ''}</span>
-              </div>) : <p className="journey-source">현재 이 정류소에서 {live.route || '해당 노선'} 도착 예정 정보가 없어요.{live.others.length > 0 ? ` (주변 정류소 다른 노선: ${live.others.slice(0, 2).map(o => `${o.route} ${o.first}`).join(', ')})` : ''}</p>}
-            </div>}
-          </div>}
+          {firstStep && transit.provider && <TransitArrivals key={transitIdentity(transit)} step={firstStep} from={from} routeRegion={region} />}
         </div>}
-        {!transit && <p className="journey-source">경로 조회로 버스·지하철 노선과 첫 승차 실시간 도착을 확인하거나 외부 지도를 이용하세요.</p>}
       </>}
       {from.mode === 'car' && <>
         {car && <p className="journey-source">{(car.meters / 1000).toFixed(1)}km · {new Date(car.fetchedAt).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} 조회<br />자동차 예상 시간이에요.</p>}

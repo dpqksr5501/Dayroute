@@ -4,5 +4,6 @@ import App from './App';
 import './styles.css';
 import './covers.css';
 import './journey.css';
+import './transitCandidates.css';
 
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);

@@ -65,6 +65,13 @@ export function transitLiveParams(step: TransitStep, fallback: Stop, region: 'se
     lat: String(step.fromLat ?? fallback.lat ?? ''),
   };
 }
+export function transitLiveRegion(step: TransitStep, fallback: Stop, routeRegion?: string): 'seoul' | 'gyeonggi' {
+  if (/^\d{5}$/.test(step.stationId ?? '')) return 'seoul';
+  if (/^\d{9}$/.test(step.stationId ?? '')) return 'gyeonggi';
+  const lng = step.fromLng ?? fallback.lng, lat = step.fromLat ?? fallback.lat;
+  if (lng === null || lat === null) return routeRegion?.includes('경기') ? 'gyeonggi' : 'seoul';
+  return lng >= 126.76 && lng <= 127.19 && lat >= 37.42 && lat <= 37.70 ? 'seoul' : 'gyeonggi';
+}
 export function normalizeRouteName(raw: string): string {
   return raw.trim()
     .replace(/^(수도권|서울|경기|인천|간선|지선|광역|순환|마을|심야|직행좌석|일반|좌석|급행)[\s:·-]*/g, '')
