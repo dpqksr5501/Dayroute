@@ -32,7 +32,7 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
   const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 760px)').matches);
 
   const [activeLegId, setActiveLegId] = useState(() => route.stops[0]?.id || originLegId);
-  const [drawerOpen, setDrawerOpen] = useState(true);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [locationError, setLocationError] = useState('');
   const [selectedTransit, setSelectedTransit] = useState<{ id: string; route: TransitLeg } | null>(null);
   const [roadCoordinates, setRoadCoordinates] = useState<Record<string, [number, number][]>>({});
@@ -101,7 +101,12 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
     return () => controller.abort();
   }, [mapVisible, roadQuery, roadKey, roadAlreadySaved, roadAlreadyLoaded]);
 
-  const patch = (p: Partial<Route>) => onChange({ ...latestRoute.current, ...p, updatedAt: new Date().toISOString() });
+  const patch = (p: Partial<Route>) => {
+    const next = { ...latestRoute.current, ...p, updatedAt: new Date().toISOString() };
+    if (!onChange(next)) return false;
+    latestRoute.current = next;
+    return true;
+  };
   const patchStop = (id: string, p: Partial<Stop>) => patch({ stops: latestRoute.current.stops.map(s => s.id === id ? { ...s, ...p } : s) });
   const move = (from: number, to: number) => {
     if (from === to || to < 0 || to >= route.stops.length) return;

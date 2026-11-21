@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { ArrowDownToLine, ArrowRight, ArrowUpFromLine, Check, CheckCheck, Clock3, Copy,
   Heart, LayoutGrid, Link2, MapPin, Plus, Route as RouteIcon, Search, Settings2, Sparkles, Undo2, WifiOff, X, CalendarDays, ExternalLink, FolderHeart } from 'lucide-react';
 import { cloneRoute, copyRoute, decodeShare, encodeShare, formatDuration, hasCoordinates, makeRoute, parseLibrary, routeText, totalMinutes, type Route } from './domain';
-import { downloadBackup, loadRoutes, saveRoutes, STORAGE_KEY } from './storage';
+import { downloadBackup } from './storage';
+import { useRouteLibrary } from './useRouteLibrary';
 import Modal from './components/Modal';
 import RouteEditor from './components/RouteEditor';
 import RouteCover from './components/RouteCover';
@@ -17,63 +18,44 @@ function readShared(): { route: Route | null; error: string } {
 }
 function Brand() { return <span className="brand"><span className="brand-mark"><RouteIcon size={23} strokeWidth={2.2} /></span>dayroute<span className="brand-period">.</span></span>; }
 export default function App() {
-  const [initial] = useState(loadRoutes), [shared] = useState(readShared);
-  const [routes, setRoutes] = useState<Route[]>(initial.routes);
-  const [storageBlocked, setStorageBlocked] = useState(!!initial.error);
+  const [shared] = useState(readShared);
+  const library = useRouteLibrary();
+  const { routes } = library;
   const [activeId, setActiveId] = useState<string | null>(null);
   const [sharedRoute, setSharedRoute] = useState<Route | null>(shared.route);
   const [section, setSection] = useState<'library' | 'favorites'>('library');
   const [query, setQuery] = useState(''), [region, setRegion] = useState('전체'), [sort, setSort] = useState('updated');
   const [modal, setModal] = useState<'new' | 'settings' | 'share' | null>(null);
   const [newTitle, setNewTitle] = useState(''), [newRegion, setNewRegion] = useState('서울'), [newDate, setNewDate] = useState('');
-  const [notice, setNotice] = useState(initial.error || shared.error), [toast, setToast] = useState('');
+  const [notice, setNotice] = useState(shared.error), [toast, setToast] = useState('');
   const [online, setOnline] = useState(navigator.onLine);
   const [history, setHistory] = useState<Route[][]>([]);
-  const [storageConflict, setStorageConflict] = useState(false);
-  const importInput = useRef<HTMLInputElement>(null), storedRaw = useRef(initial.raw);
+  const importInput = useRef<HTMLInputElement>(null);
   const release = useRelease();
   const active = sharedRoute || routes.find(r => r.id === activeId);
   const isLocal = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
   const notify = (message: string) => setToast(message);
-  const saveStatus = !online ? '오프라인' : storageBlocked || storageConflict ? '저장 확인 필요'
-    : storedRaw.current === null ? '예시 코스' : '브라우저에 저장됨';
+  const saveStatus = !library.ready ? '보관함 불러오는 중' : library.pending ? '브라우저에 저장하는 중'
+    : library.issue ? '저장 확인 필요' : !online ? '오프라인' : library.stored ? '브라우저에 저장됨' : '예시 코스';
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 4500); return () => clearTimeout(t); }, [toast]);
   useEffect(() => {
     const net = () => setOnline(navigator.onLine);
-    const sync = (e: StorageEvent) => {
-      if (e.storageArea !== localStorage) return;
-      if ((e.key === STORAGE_KEY || e.key === null) && e.newValue !== storedRaw.current) {
-        setStorageConflict(true);
-        setNotice('다른 탭에서 보관함이 바뀌었어요. 이 탭의 코스를 백업한 뒤 최신 보관함을 불러와 주세요.');
-      }
-    };
-    window.addEventListener('online', net); window.addEventListener('offline', net); window.addEventListener('storage', sync);
-    return () => { window.removeEventListener('online', net); window.removeEventListener('offline', net); window.removeEventListener('storage', sync); };
+    window.addEventListener('online', net); window.addEventListener('offline', net);
+    return () => { window.removeEventListener('online', net); window.removeEventListener('offline', net); };
   }, []);
-  const storeRoutes = (next: Route[], expected = storedRaw.current) => {
-    const saved = saveRoutes(next, expected);
-    if (saved.ok) {
-      storedRaw.current = saved.raw;
-      return true;
-    }
-    if (saved.reason === 'conflict') {
-      setStorageConflict(true);
-      setNotice('다른 탭에서 보관함이 바뀌었어요. 최신 보관함을 불러온 뒤 다시 저장해 주세요.');
-    }
-    return false;
-  };
   const commit = (next: Route[]) => {
-    if (storageBlocked || storageConflict) { notify('저장 상태를 먼저 확인해 주세요. 설정에서 백업·복원할 수 있어요.'); return false; }
     if (next.length > 500) { notify('코스는 최대 500개까지 보관할 수 있어요. 먼저 백업하고 정리해 주세요.'); return false; }
-    if (!storeRoutes(next)) { notify('저장하지 못했어요. 보관함 상태와 저장 공간을 확인해 주세요.'); return false; }
-    setHistory(h => [...h.slice(-39), routes]); setRoutes(next);
+    const previous = library.current();
+    if (!library.commit(next)) { notify('저장 상태를 먼저 확인해 주세요. 설정에서 백업·복원할 수 있어요.'); return false; }
+    setHistory(h => [...h.slice(-39), previous]);
     return true;
   };
-  const undo = () => {
-    if (!history.length || storageBlocked || storageConflict) return;
+  const undo = async () => {
+    if (!history.length) return;
     const previous = history[history.length - 1];
-    if (!storeRoutes(previous)) { notify('되돌린 내용을 저장하지 못했어요.'); return; }
-    setRoutes(previous); setHistory(h => h.slice(0, -1)); notify('이전 상태로 되돌렸어요.');
+    if (!library.commit(previous)) { notify('되돌린 내용을 저장하지 못했어요.'); return; }
+    setHistory(h => h.slice(0, -1));
+    if (await library.flush()) notify('이전 상태로 되돌렸어요.');
   };
   useEffect(() => {
     const readLocation = () => {
@@ -90,7 +72,12 @@ export default function App() {
   const goHome = () => { setActiveId(null); setSharedRoute(null); window.history.pushState(null, '', location.pathname + location.search); window.scrollTo(0, 0); };
   const openRoute = (r: Route) => { setActiveId(r.id); setSharedRoute(null); window.history.pushState(null, '', `#route=${encodeURIComponent(r.id)}`); window.scrollTo(0, 0); };
   const newRoute = () => { setNewTitle(''); setNewDate(''); setNewRegion('서울'); setModal('new'); };
-  const duplicate = (r: Route) => { const copy = cloneRoute(r); if (commit([copy, ...routes])) { openRoute(copy); notify('코스를 복사했어요. 새로운 날짜로 다시 계획해 보세요.'); } };
+  const duplicate = async (r: Route) => {
+    const copy = cloneRoute(r);
+    if (!commit([copy, ...library.current()])) return;
+    openRoute(copy);
+    if (await library.flush()) notify('코스를 복사했어요. 새로운 날짜로 다시 계획해 보세요.');
+  };
   const filtered = routes.filter(r => (section !== 'favorites' || r.favorite) && (region === '전체' || (region === '경기' ? r.region.includes('경기') : r.region.includes('서울')))
     && `${r.title} ${r.region} ${r.description} ${r.stops.map(s => s.name).join(' ')}`.toLowerCase().includes(query.toLowerCase().trim()))
     .sort((a, b) => sort === 'title' ? a.title.localeCompare(b.title, 'ko') : b.updatedAt.localeCompare(a.updatedAt));
@@ -112,17 +99,24 @@ export default function App() {
           {history.length > 0 && <button className="icon-button" aria-label="실행 취소" onClick={undo}><Undo2 size={18} /></button>}
           <button className="avatar" aria-label="설정과 데이터 열기" onClick={() => setModal('settings')}>D</button></div>
       </header>
-      {notice && <div className="notice" role="alert"><span>{notice}</span><button className="text-button" onClick={() => setModal('settings')}>설정 열기</button>{!storageBlocked && !storageConflict && <button className="icon-button" aria-label="안내 닫기" onClick={() => setNotice('')}><X size={16} /></button>}</div>}
+      {(library.issue || notice) && <div className="notice" role="alert"><span>{library.issue || notice}</span><button className="text-button" onClick={() => setModal('settings')}>설정 열기</button>{!library.issue && <button className="icon-button" aria-label="안내 닫기" onClick={() => setNotice('')}><X size={16} /></button>}</div>}
       {release.available && <div className="update-banner"><Sparkles size={17} /><span>새 버전이 준비됐어요. 코스를 저장한 뒤 업데이트할 수 있어요.</span><button className="text-button" onClick={async () => {
-        let current = false;
-        try { current = localStorage.getItem(STORAGE_KEY) === storedRaw.current; } catch {}
-        if (storageBlocked || storageConflict || !current) { notify('먼저 코스를 백업하고 저장 상태를 확인해 주세요.'); return; }
+        if (!library.ready || !await library.flush()) { notify('먼저 코스를 백업하고 저장 상태를 확인해 주세요.'); return; }
         if (!(await release.apply())) notify('업데이트를 받지 못했어요. 인터넷 연결을 확인해 주세요.');
       }}>저장하고 업데이트</button></div>}
-      <main id="main">{active ? <RouteEditor key={active.id} route={active} readonly={!!sharedRoute} onBack={goHome}
-        onChange={r => commit(routes.map(x => x.id === r.id ? r : x))} onShare={() => setModal('share')} onDuplicate={() => duplicate(active)}
-        onDelete={() => { if (commit(routes.filter(r => r.id !== active.id))) { goHome(); notify('코스를 삭제했어요. 실행 취소로 복구할 수 있어요.'); } }}
-        onSaveCopy={() => { const copy = copyRoute(active); if (commit([copy, ...routes])) { openRoute(copy); notify('내 보관함에 저장했어요.'); } }} /> : <div className="library-page">
+      <main id="main">{!library.ready && !active ? <p className="library-page" role="status">보관함을 불러오는 중이에요.</p> : active ? <RouteEditor key={active.id} route={active} readonly={!!sharedRoute} onBack={goHome}
+        onChange={r => commit(library.current().map(x => x.id === r.id ? r : x))} onShare={() => setModal('share')} onDuplicate={() => void duplicate(active)}
+        onDelete={async () => {
+          if (!commit(library.current().filter(r => r.id !== active.id))) return;
+          goHome();
+          if (await library.flush()) notify('코스를 삭제했어요. 실행 취소로 복구할 수 있어요.');
+        }}
+        onSaveCopy={async () => {
+          const copy = copyRoute(active);
+          if (!commit([copy, ...library.current()])) return;
+          openRoute(copy);
+          if (await library.flush()) notify('내 보관함에 저장했어요.');
+        }} /> : <div className="library-page">
         <div className="page-heading"><h1>{section === 'favorites' ? '즐겨찾기' : '코스 보관함'}<span className="heading-count">{filtered.length}</span></h1><button className="primary" onClick={newRoute} aria-label="새 코스 만들기"><Plus size={18} /> 새 코스</button></div>
         <section className="collection" aria-label="저장한 코스">
           <div className="collection-heading"><select className="sort-select" aria-label="코스 정렬" value={sort} onChange={e => setSort(e.target.value)}><option value="updated">최근 수정순</option><option value="title">이름순</option></select></div>
@@ -138,8 +132,8 @@ export default function App() {
     {modal === 'new' && <Modal title="새 코스" onClose={() => setModal(null)}><form onSubmit={e => { e.preventDefault(); const route = { ...makeRoute(), title: newTitle.trim() || '새로운 하루', region: newRegion, date: newDate }; if (commit([route, ...routes])) { setModal(null); openRoute(route); } }}>
       <div className="form-grid"><label className="span-2">코스 이름<input autoFocus required maxLength={100} value={newTitle} placeholder="예: 느긋하게 보내는 토요일" onChange={e => setNewTitle(e.target.value)} /></label><label>지역<select value={newRegion} onChange={e => setNewRegion(e.target.value)}><option>서울</option><option>경기</option><option>기타</option></select></label><label>날짜 · 선택<input type="date" value={newDate} onChange={e => setNewDate(e.target.value)} /></label></div><div className="modal-footer"><button type="button" className="secondary" onClick={() => setModal(null)}>취소</button><button className="primary" type="submit">코스 만들기 <ArrowRight size={16} /></button></div></form></Modal>}
     {modal === 'settings' && <Modal title="설정과 데이터" onClose={() => setModal(null)}>
-      <div className="settings-section"><h3>데이터</h3><p>이 브라우저에 저장돼요. 기기를 바꾸거나 데이터를 지우기 전에 백업하세요.</p><div className="button-row"><button className="secondary" onClick={() => downloadBackup(routes)}><ArrowDownToLine size={17} /> 전체 백업</button><button className="secondary" onClick={() => importInput.current?.click()}><ArrowUpFromLine size={17} /> 파일 가져오기</button></div>
-        {storageConflict && <button className="text-button" onClick={() => { downloadBackup(routes); location.reload(); }}>이 탭을 백업하고 최신 보관함 불러오기</button>}
+      <div className="settings-section"><h3>데이터</h3><p>이 브라우저에 저장돼요. 기기를 바꾸거나 데이터를 지우기 전에 백업하세요.</p><div className="button-row"><button className="secondary" disabled={!library.ready} onClick={() => downloadBackup(library.current())}><ArrowDownToLine size={17} /> 전체 백업</button><button className="secondary" disabled={!library.ready || library.pending} onClick={() => importInput.current?.click()}><ArrowUpFromLine size={17} /> 파일 가져오기</button></div>
+        {(library.conflict || (library.dirty && !library.pending)) && <button className="text-button" onClick={() => { downloadBackup(library.current()); library.discardDraft(); location.reload(); }}>이 탭을 백업하고 최신 보관함 불러오기</button>}
       </div>
       <div className="settings-section"><h3>앱처럼 사용하기</h3><p>휴대폰 브라우저 메뉴에서 ‘홈 화면에 추가’를 선택하세요. 실행하거나 화면으로 돌아왔을 때 새 버전을 확인해요. 지도는 인터넷 연결이 필요해요.</p><span className="version-label">v{__APP_RELEASE__.version} · {import.meta.env.DEV ? '개발 미리보기' : '웹앱'} · {online ? '온라인' : '오프라인'}{release.offlineReady ? ' · 앱 화면 오프라인 준비 완료' : ''}</span><button className="text-button" onClick={() => void release.check()}>새 버전 확인</button><span className="version-label" role="status">{release.lastCheck}</span></div>
       <div className="settings-section"><h3>지도와 장소 정보</h3><p>무료 지도: MapLibre · OpenFreeMap · OpenStreetMap. 지도 화면을 열 때 표시 영역이 지도 제공자에게 요청돼요. 실사 3D·실시간 영업시간·도로 경로 자동 계산은 아직 연결하지 않았어요. 기본 장소 위치는 예시이므로 방문 전에 원문 지도를 확인해 주세요.</p><a href="https://openfreemap.org/" target="_blank" rel="noreferrer" className="inline-link">지도 제공 안내 <ExternalLink size={13} /></a></div>
@@ -155,21 +149,9 @@ export default function App() {
       const file = e.target.files?.[0]; e.target.value = ''; if (!file) return;
       try { if (file.size > 5_000_000) throw new Error('파일은 5MB 이하여야 해요.'); const backup = parseLibrary(await file.text());
         const imported = backup.routes.map(copyRoute);
-        const latest = loadRoutes();
-        if (latest.raw === undefined) throw new Error('보관함을 읽을 수 없어 가져오지 못했어요.');
-        const existing = latest.error || (latest.raw === null && storedRaw.current === null) ? routes
-          : latest.raw === null ? [] : latest.routes;
-        const next = [...imported, ...existing];
-        if (next.length > 500) throw new Error('보관함에는 최대 500개 코스를 저장할 수 있어요.');
-        if (latest.error && latest.raw !== null) {
-          const url = URL.createObjectURL(new Blob([latest.raw], { type: 'application/json' }));
-          const a = document.createElement('a'); a.href = url; a.download = 'dayroute-recovery-original.json'; a.click();
-          setTimeout(() => URL.revokeObjectURL(url), 1000);
-        }
-        const sourceChanged = latest.raw !== storedRaw.current;
-        if (!storeRoutes(next, latest.raw)) throw new Error('보관함이 바뀌었거나 저장 공간이 부족해 가져오지 못했어요.');
-        setHistory(h => [...(sourceChanged ? [] : h.slice(-39)), existing]);
-        setStorageBlocked(false); setStorageConflict(false); setNotice(''); setRoutes(next);
+        const restored = await library.restore(imported);
+        setHistory(h => [...(restored.sourceChanged ? [] : h.slice(-39)), restored.previous]);
+        setNotice('');
         notify(`${imported.length}개 코스를 가져왔어요. 기존 코스도 그대로 보관돼요.`);
       } catch (err) { notify(err instanceof Error ? err.message : '파일을 가져오지 못했어요.'); }
     }} />

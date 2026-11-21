@@ -26,14 +26,21 @@ export default defineConfig(({ mode }) => ({
 const FILES = ${JSON.stringify(files)};
 self.addEventListener('install', event => { event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(FILES))); });
 self.addEventListener('message', event => { if (event.data === 'SKIP_WAITING') self.skipWaiting(); });
-self.addEventListener('activate', event => { event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith('dayroute-') && k !== CACHE).map(k => caches.delete(k))))); });
+self.addEventListener('activate', event => {
+  event.waitUntil(caches.keys().then(keys => {
+    const older = keys.filter(key => key.startsWith('dayroute-') && key !== CACHE);
+    return Promise.all(older.slice(0, -1).map(key => caches.delete(key)));
+  }));
+});
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
   if (event.request.method !== 'GET' || url.origin !== self.location.origin || url.pathname === '/version.json') return;
   if (event.request.mode === 'navigate') {
-    event.respondWith(fetch(event.request).then(async response => { if(response.ok) { const cache = await caches.open(CACHE); await cache.put('/index.html', response.clone()); } return response; }).catch(() => caches.match('/index.html', { ignoreVary: true })));
+    event.respondWith(fetch(event.request).catch(() => caches.match('/index.html', { cacheName: CACHE })));
   } else if (FILES.includes(url.pathname)) {
     event.respondWith(caches.open(CACHE).then(cache => cache.match(url.pathname, { ignoreVary: true })).then(cached => cached || fetch(event.request)));
+  } else if (url.pathname.startsWith('/assets/')) {
+    event.respondWith(caches.match(event.request).then(cached => cached || fetch(event.request)));
   }
 });`;
       this.emitFile({ type: 'asset', fileName: 'sw.js', source });

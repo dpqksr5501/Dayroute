@@ -4,6 +4,7 @@ import maplibregl from '../mapRuntime';
 import { Box, Crosshair, LocateFixed, RotateCcw } from 'lucide-react';
 import { carFor, hasCoordinates, roadPreviewKey, transitFor, walkingFor, type Stop, type TransitLeg } from '../domain';
 import { mapPreviewPlan } from '../mapPreviewPlan';
+import MapPreviewCredit from './MapPreviewCredit';
 
 export interface UserLocation { lng: number; lat: number; address?: string }
 interface Props {
@@ -70,7 +71,7 @@ export default function MapView({
         fitBoundsOptions: { padding: 85, maxZoom: 15.3 },
         touchZoomRotate: true, touchPitch: true, dragPan: true, dragRotate: true,
         doubleClickZoom: true, scrollZoom: true, keyboard: true, cooperativeGestures: false,
-        attributionControl: { compact: true }, maxPitch: 65, canvasContextAttributes: { antialias: true },
+        attributionControl: false, maxPitch: 65, canvasContextAttributes: { antialias: true },
       });
       map.current = instance;
       instance.touchZoomRotate.enableRotation();
@@ -305,6 +306,7 @@ export default function MapView({
       </button>
     </div>
     <div className="map-route-key">{previewTransit ? '파랑 · 도보 / 초록 · 버스 / 노랑 · 철도' : '녹색 점선 · 장소 간 연결'}</div>
+    {ready && <MapPreviewCredit />}
     {picking && <div className="map-pick-message"><Crosshair size={17} /> 지도를 눌러 장소의 위치를 지정하세요</div>}
     {error && <div className="map-error" role="status">{error}</div>}
     {!ready && !error && <div className="map-loading"><span className="spinner" /> 지도를 펼치고 있어요</div>}

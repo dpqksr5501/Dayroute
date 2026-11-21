@@ -1,13 +1,17 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { BusArrival, BusResult, BusStation, PoiItem, TransitLiveResult, TransitOption, TransitRouteResult, TransportCode, WalkingResult } from '../src/transport.ts';
 import type { Category, TransitLeg, TransitStep, TransitStepMode, WalkingLeg } from '../src/domain.ts';
+import { hasSharedTransitBudget, pauseTransitRequests, reserveTransitRequest } from '../server/transitBudget.ts';
 
 type Env = Record<string, string | undefined>;
 type RecordValue = Record<string, unknown>;
 
 export class TransportError extends Error {
   code: TransportCode;
-  constructor(code: TransportCode, message: string) { super(message); this.code = code; }
+  retryAfter?: number;
+  constructor(code: TransportCode, message: string, retryAfter?: number) {
+    super(message); this.code = code; this.retryAfter = retryAfter;
+  }
 }
 
 const DEFAULT_ENV: Record<string, string> = {
@@ -117,7 +121,12 @@ async function json(url: string, init: RequestInit, fetcher: typeof fetch) {
   }
   if (!response.ok) {
     void response.body?.cancel().catch(() => {});
-    if (response.status === 429) throw new TransportError('quota', '조회 한도에 도달했어요. 잠시 후 다시 확인하세요.');
+    if (response.status === 429) {
+      const retry = response.headers.get('Retry-After') || '';
+      const seconds = /^\d+$/.test(retry) ? Number(retry) : Math.ceil((Date.parse(retry) - Date.now()) / 1000);
+      throw new TransportError('quota', '조회 한도에 도달했어요. 잠시 후 다시 확인하세요.',
+        Number.isFinite(seconds) && seconds > 0 ? Math.min(86_400, seconds) : undefined);
+    }
     if (response.status === 401 || response.status === 403) {
       throw new TransportError('unconfigured', 'API 키가 아직 제공처에 동기화 중이거나(발급 후 최대 1시간 소요) 앱 상품 연결이 필요해요.');
     }
@@ -574,6 +583,7 @@ export async function transportData(params: URLSearchParams, env: Env = process.
     pois: tmapEnabled,
     transit: transitEnabled,
     transitMap: transitMapAllowed,
+    transitSharedBudget: hasSharedTransitBudget(env),
     seoul: !!env.SEOUL_BUS_SERVICE_KEY,
     gyeonggi: !!(env.GYEONGGI_BUS_SERVICE_KEY || env.GYEONGGI_BUS_STATION_KEY),
     subway: !!env.SEOUL_SUBWAY_SERVICE_KEY,
@@ -614,11 +624,22 @@ export async function transportData(params: URLSearchParams, env: Env = process.
       }
       const apiKey = env.TMAP_APP_KEY;
       if (apiKey && (env.TMAP_TRANSIT_CONFIRMED === 'true' || env.TMAP_FREE_PLAN_CONFIRMED === 'true')) {
-        consume('tmap-transit');
-        const body = await json('https://apis.openapi.sk.com/transit/routes', {
-          method: 'POST', headers: { appKey: apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify({ startX: String(lng), startY: String(lat), endX: String(toLng), endY: String(toLat), count: 5, lang: 0, format: 'json' }),
-        }, fetcher);
+        let wait: number;
+        try { wait = await reserveTransitRequest(env, fetcher); }
+        catch { throw new TransportError('upstream', '대중교통 조회 상태를 확인하지 못했어요. 잠시 후 다시 시도하세요.'); }
+        if (wait) throw new TransportError('quota', '대중교통 조회 한도에 도달했어요. 잠시 후 다시 확인하세요.', wait);
+        let body: RecordValue;
+        try {
+          body = await json('https://apis.openapi.sk.com/transit/routes', {
+            method: 'POST', headers: { appKey: apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({ startX: String(lng), startY: String(lat), endX: String(toLng), endY: String(toLat), count: 5, lang: 0, format: 'json' }),
+          }, fetcher);
+        } catch (error) {
+          if (error instanceof TransportError && error.code === 'quota') {
+            error.retryAfter = await pauseTransitRequests(env, fetcher, error.retryAfter).catch(() => error.retryAfter);
+          }
+          throw error;
+        }
         // A successful TMAP response with status 11 indicates nearby endpoints.
         if (Number(record(body.result).status) === 11) return nearbyTransitResult(params, env, fetcher);
         return parseTmapTransit(body, key, transitMapAllowed);
@@ -709,7 +730,10 @@ export async function handleTransport(req: IncomingMessage, res: ServerResponse,
     const params = new URL(req.url || '/', 'http://localhost').searchParams;
     const data = await transportData(params, { ...DEFAULT_ENV, ...env }); res.end(JSON.stringify({ data }));
   } catch (error) {
-    if (error instanceof TransportError) return fail(error.code === 'invalid' ? 400 : error.code === 'quota' ? 429 : error.code === 'upstream' ? 502 : 503, error.code, error.message);
+    if (error instanceof TransportError) {
+      if (error.retryAfter) res.setHeader('Retry-After', String(error.retryAfter));
+      return fail(error.code === 'invalid' ? 400 : error.code === 'quota' ? 429 : error.code === 'upstream' ? 502 : 503, error.code, error.message);
+    }
     return fail(502, 'upstream', '정보를 가져오지 못했어요. 잠시 후 다시 확인하세요.');
   }
 }
