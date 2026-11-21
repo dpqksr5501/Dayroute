@@ -18,7 +18,7 @@ pnpm preview
 
 `dev`: 개발·자동 새로고침. `preview`: 빌드 결과, PWA 캐시·업데이트 확인. 홈 화면 설치 및 서비스 워커는 HTTPS 또는 localhost에서 동작합니다. PWA 앱 설치 방식은 OS·브라우저에 따라 다릅니다.
 
-Vercel 배포 및 Android 테스트는 [휴대폰 테스트 가이드](docs/PHONE_TESTING.md)를 참고하세요. `vercel.json`에 Vite 빌드·출력 경로와 업데이트용 캐시 헤더를 설정했습니다. Node.js 24 및 pnpm 11.25.0으로 고정합니다.
+Vercel 배포 및 Android 테스트는 [휴대폰 테스트 가이드](docs/PHONE_TESTING.md)를 참고하세요. `vercel.json`에서 `package.json`에 지정된 pnpm으로 잠금 파일 그대로 설치하고, Vite 빌드·출력 경로와 업데이트용 캐시 헤더를 설정합니다. 설치와 빌드에서 npm을 실행할 때 npm이 지원하지 않는 `npm_config_cache_dir`만 빼고 pnpm의 캐시 설정은 유지합니다. 로컬 개발에는 Node.js 24 LTS를 사용하며, Vercel 빌드의 Node.js 버전은 프로젝트 설정에서 관리합니다.
 
 운영 배포 후 `pnpm verify:deployment`로 HTML, 앱 번들, 보안 헤더, 교통 함수의 시작과 설정 상태를 확인합니다. `pnpm verify:deployment --arrivals`는 성동13·성수역 2호선 실시간 응답도 확인합니다. 두 검사 모두 TMAP 경로 한도를 사용하지 않습니다. Preview URL을 확인할 때는 `pnpm verify:deployment <URL> --preview`를 실행합니다.
 
