@@ -59,7 +59,7 @@ export default function BusPanel({
         if (!controller.signal.aborted) { setResult(data); setNow(Date.now()); }
       } else {
         setStation(null); setResult(null);
-        const data = await transportRequest<BusStation[]>({ action: 'stations', region, ...coordinates(stop) }, controller.signal, 300000);
+        const data = await transportRequest<BusStation[]>({ action: 'stations', region, ...coordinates(stop) }, controller.signal);
         if (!controller.signal.aborted) { setStations(data); if (!data.length) setError('500m 안에 조회 가능한 정류소가 없어요. 지역과 장소 위치를 확인하세요.'); }
       }
     } catch (e) { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : '조회하지 못했어요.'); }

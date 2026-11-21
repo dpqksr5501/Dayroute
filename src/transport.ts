@@ -22,12 +22,18 @@ export interface TransportStatus {
   seoul: boolean; gyeonggi: boolean; subway: boolean;
 }
 const cache = new Map<string, { until: number; data: unknown }>();
-// Explicit actions only. No background polling, retries, or geolocation requests.
-export async function transportRequest<T>(params: Record<string, string>, signal: AbortSignal, ttl = 30000): Promise<T> {
-  const query = new URLSearchParams(params).toString();
-  const hit = cache.get(query);
-  if (hit && hit.until > Date.now()) return hit.data as T;
-  if (!navigator.onLine) throw new TransportError('offline', '오프라인이에요. 연결 후 다시 조회하세요.');
+interface PendingTransport {
+  controller: AbortController;
+  response: Promise<unknown>;
+  subscribers: number;
+}
+const inflight = new Map<string, PendingTransport>();
+const cacheLifetimes: Record<string, number> = {
+  walk: 3600000, car: 3600000, 'reverse-geocode': 3600000,
+  transit: 1800000, pois: 1800000, stations: 300000,
+};
+
+async function loadTransport(query: string, signal: AbortSignal): Promise<unknown> {
   const timeout = AbortSignal.timeout(12000);
   let response: Response;
   try { response = await fetch(`/api/transport?${query}`, { signal: AbortSignal.any([signal, timeout]), cache: 'no-store' }); }
@@ -35,12 +41,56 @@ export async function transportRequest<T>(params: Record<string, string>, signal
     if (signal.aborted) throw error;
     throw new TransportError('upstream', '조회하지 못했어요. 잠시 후 다시 시도하세요.');
   }
-  let body: { data?: T; code?: TransportCode; message?: string };
+  let body: { data?: unknown; code?: TransportCode; message?: string };
   try { body = await response.json(); } catch { throw new TransportError('upstream', '교통 서버에 연결하지 못했어요.'); }
   if (!response.ok || body.data === undefined) throw new TransportError(body.code || 'upstream', body.message || '정보를 가져오지 못했어요.');
-  if (cache.size > 150) cache.clear();
-  cache.set(query, { until: Date.now() + ttl, data: body.data });
   return body.data;
+}
+
+export async function transportRequest<T>(params: Record<string, string>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  const search = new URLSearchParams(params);
+  search.sort();
+  const query = search.toString();
+  const hit = cache.get(query);
+  if (hit && hit.until > Date.now()) return hit.data as T;
+  if (!navigator.onLine) throw new TransportError('offline', '오프라인이에요. 연결 후 다시 조회하세요.');
+
+  let request = inflight.get(query);
+  if (!request) {
+    const controller = new AbortController();
+    const ttl = cacheLifetimes[params.action] ?? 30000;
+    const response = loadTransport(query, controller.signal).then(data => {
+      controller.signal.throwIfAborted();
+      cache.delete(query);
+      if (cache.size >= 150) {
+        const oldest = cache.keys().next().value;
+        if (oldest !== undefined) cache.delete(oldest);
+      }
+      cache.set(query, { until: Date.now() + ttl, data });
+      return data;
+    }).finally(() => {
+      if (inflight.get(query)?.controller === controller) inflight.delete(query);
+    });
+    request = { controller, response, subscribers: 0 };
+    inflight.set(query, request);
+  }
+
+  request.subscribers++;
+  let onAbort: () => void = () => {};
+  const cancellation = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([request.response, cancellation]) as T;
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+    if (--request.subscribers === 0 && inflight.get(query) === request) {
+      inflight.delete(query);
+      request.controller.abort();
+    }
+  }
 }
 export const coordinates = (s: Stop) => ({ lng: String(s.lng), lat: String(s.lat) });
 export const walkingParams = (a: Stop, b: Stop) => ({ action: 'walk', lng: String(a.lng), lat: String(a.lat), toLng: String(b.lng), toLat: String(b.lat) });
@@ -61,6 +111,7 @@ export function transitLiveParams(step: TransitStep, fallback: Stop, region: 'se
     stationName: step.from || '',
     direction: step.to || '',
     ...(step.stationId ? { station: step.stationId } : {}),
+    ...(step.fromLng !== undefined && step.fromLat !== undefined ? { stationPoint: 'true' } : {}),
     lng: String(step.fromLng ?? fallback.lng ?? ''),
     lat: String(step.fromLat ?? fallback.lat ?? ''),
   };

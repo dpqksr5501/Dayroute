@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { carFor, decodeShare, encodeShare, legMinutes, makeRoute, makeStop, routeText, transitFor, walkingKey } from '../src/domain.ts';
-import { firstTransitStep, normalizeRouteName, type TransitOption } from '../src/transport.ts';
+import { firstTransitStep, normalizeRouteName, transportRequest, type TransitOption } from '../src/transport.ts';
 import { originLegId, sortTransitOptions, transitArrivalTime, transitCategory, transitDepartureTime, transitLegs } from '../src/transitCandidates.ts';
 import handler, { handleTransport, matchRouteArrivals, parseOdsayTransit, parseSubwayArrivals, parseTmapPois, parseTmapReverseGeocode, parseTmapTransit, transportData, TransportError } from '../api/transport.ts';
 
@@ -91,7 +91,10 @@ test('transit-live stitches boarding station lookup with live arrival matching',
     if (url.includes('getStationByPos')) {
       return new Response(JSON.stringify({
         msgHeader: { headerCd: '0' },
-        msgBody: { itemList: [{ arsId: '04112', stationNm: '성수역3번출구', dist: 85 }] },
+        msgBody: { itemList: [
+          { arsId: '04113', stationNm: '성수역3번출구', dist: 48 },
+          { arsId: '04112', stationNm: '성수역3번출구', dist: 3 },
+        ] },
       }), { status: 200 });
     }
     return new Response(JSON.stringify({
@@ -108,11 +111,14 @@ test('transit-live stitches boarding station lookup with live arrival matching',
     region: 'seoul',
     route: '간선:302',
     stationName: '성수역 3번 출구',
+    stationPoint: 'true',
     lng: '127.056',
     lat: '37.545',
   });
-  const res = await transportData(params, { SEOUL_BUS_SERVICE_KEY: 'test-key' }, fakeFetch) as {
+  const env = { SEOUL_BUS_SERVICE_KEY: 'test-key' };
+  const res = await transportData(params, env, fakeFetch) as {
     stationName: string; stationNumber?: string; matched: { route: string; first: string }[]; others: { route: string }[];
+    fetchedAt: string;
   };
   assert.equal(calls.length, 2);
   assert.equal(res.stationName, '성수역3번출구');
@@ -121,11 +127,49 @@ test('transit-live stitches boarding station lookup with live arrival matching',
   assert.equal(res.matched[0].route, '302');
   assert.equal(res.others.length, 1);
   assert.equal(res.others[0].route, '2016');
+  assert.ok(calls[1].includes('arsId=04112'));
+
+  const nearby = await transportData(new URLSearchParams({ action: 'arrivals', region: 'seoul', station: '04112' }), env, fakeFetch) as { fetchedAt: string };
+  assert.equal(nearby.fetchedAt, res.fetchedAt);
+  params.delete('stationPoint');
+  await assert.rejects(transportData(params, env, fakeFetch),
+    (error: unknown) => error instanceof TransportError && error.code === 'unsupported');
 
   params.set('stationName', '다른 정류소');
-  await assert.rejects(transportData(params, { SEOUL_BUS_SERVICE_KEY: 'test-key' }, fakeFetch),
+  await assert.rejects(transportData(params, env, fakeFetch),
     (error: unknown) => error instanceof TransportError && error.code === 'unsupported');
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 2);
+});
+
+test('a cancelled browser view leaves a shared request available to another view', async t => {
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: true } });
+  t.after(() => {
+    if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  });
+  let reply!: (response: Response) => void;
+  const fetchMock = t.mock.method(globalThis, 'fetch', () => new Promise<Response>(resolve => { reply = resolve; }));
+  const first = new AbortController();
+  const second = new AbortController();
+  const a = transportRequest({ action: 'pois', q: '병렬 조회 검증' }, first.signal);
+  const b = transportRequest({ q: '병렬 조회 검증', action: 'pois' }, second.signal);
+  first.abort();
+  await assert.rejects(a, { name: 'AbortError' });
+  assert.equal(fetchMock.mock.callCount(), 1);
+  reply(Response.json({ data: ['장소'] }));
+  assert.deepEqual(await b, ['장소']);
+  assert.deepEqual(await transportRequest({ action: 'pois', q: '병렬 조회 검증' }, second.signal), ['장소']);
+  assert.equal(fetchMock.mock.callCount(), 1);
+});
+
+test('the provider response limit rejects an oversized body before parsing', async () => {
+  const oversized = new Uint8Array(4_000_001);
+  await assert.rejects(transportData(
+    new URLSearchParams({ action: 'pois', q: '응답 크기 검사' }),
+    { TMAP_APP_KEY: 'test-key', TMAP_FREE_PLAN_CONFIRMED: 'true' },
+    async () => new Response(oversized),
+  ), (error: unknown) => error instanceof TransportError && error.code === 'upstream' && error.message.includes('너무 커요'));
 });
 
 test('subway arrivals use the line ID and keep the provider direction', () => {

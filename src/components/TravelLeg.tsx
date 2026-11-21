@@ -47,7 +47,7 @@ export default function TravelLeg({ from, to, departure, region, readonly, onPat
     const controller = new AbortController(); request.current = controller; setBusy(true); setError('');
     try {
       const params = mode === 'walk' ? walkingParams(from, to) : carParams(from, to);
-      const data = await transportRequest<WalkingResult>(params, controller.signal, 3600000);
+      const data = await transportRequest<WalkingResult>(params, controller.signal);
       if (controller.signal.aborted) return;
       const leg: WalkingLeg = { key: data.key, minutes: data.minutes, meters: data.meters, coordinates: data.coordinates, fetchedAt: data.fetchedAt };
       if (readonly) { if (mode === 'walk') setViewWalk(leg); else setViewCar(leg); }
@@ -59,7 +59,7 @@ export default function TravelLeg({ from, to, departure, region, readonly, onPat
     if (request.current && !request.current.signal.aborted && busy) return;
     const controller = new AbortController(); request.current = controller; setBusy(true); setError('');
     try {
-      const data = await transportRequest<TransitRouteResult>(transitParams(from, to), controller.signal, 1800000);
+      const data = await transportRequest<TransitRouteResult>(transitParams(from, to), controller.signal);
       if (controller.signal.aborted) return;
       setResult(data);
     } catch (e) { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : '대중교통 경로를 조회하지 못했어요.'); }

@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { BusArrival, BusStation, PoiItem, TransitLiveResult, TransitOption, TransitRouteResult, TransportCode } from '../src/transport.ts';
+import type { BusArrival, BusResult, BusStation, PoiItem, TransitLiveResult, TransitOption, TransitRouteResult, TransportCode } from '../src/transport.ts';
 import type { Category, TransitLeg, TransitStep, TransitStepMode, WalkingLeg } from '../src/domain.ts';
 
 type Env = Record<string, string | undefined>;
@@ -67,6 +67,24 @@ const inflight = new Map<string, Promise<unknown>>();
 const budgets = new Map<string, number>();
 const limits = new Map<string, { reset: number; count: number }>();
 
+function cachedTransport<T>(key: string, ttl: number, load: () => Promise<T>): Promise<T> {
+  const hit = cache.get(key);
+  if (hit && hit.until > Date.now()) return Promise.resolve(hit.data as T);
+  const existing = inflight.get(key);
+  if (existing) return existing as Promise<T>;
+  const pending = load().then(data => {
+    cache.delete(key);
+    if (cache.size >= 200) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
+    cache.set(key, { until: Date.now() + ttl, data });
+    return data;
+  }).finally(() => inflight.delete(key));
+  inflight.set(key, pending);
+  return pending;
+}
+
 function consume(provider: string) {
   const day = new Date().toISOString().slice(0, 10), key = `${day}:${provider}`;
   for (const k of budgets.keys()) if (!k.startsWith(day)) budgets.delete(k);
@@ -98,14 +116,34 @@ async function json(url: string, init: RequestInit, fetcher: typeof fetch) {
     throw new TransportError('upstream', '제공처와 통신하지 못했어요.');
   }
   if (!response.ok) {
+    void response.body?.cancel().catch(() => {});
     if (response.status === 429) throw new TransportError('quota', '조회 한도에 도달했어요. 잠시 후 다시 확인하세요.');
     if (response.status === 401 || response.status === 403) {
       throw new TransportError('unconfigured', 'API 키가 아직 제공처에 동기화 중이거나(발급 후 최대 1시간 소요) 앱 상품 연결이 필요해요.');
     }
     throw new TransportError('upstream', '제공처에서 응답을 받지 못했어요.');
   }
-  const value: unknown = await response.json();
-  return record(value);
+  const reader = response.body?.getReader();
+  if (!reader) throw new TransportError('upstream', '제공처 응답이 비어 있어요.');
+  try {
+    const decoder = new TextDecoder();
+    let bytes = 0;
+    let body = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > 4_000_000) throw new TransportError('upstream', '제공처 응답이 너무 커요.');
+      body += decoder.decode(value, { stream: true });
+    }
+    return record(JSON.parse(body + decoder.decode()));
+  } catch (error) {
+    void reader.cancel().catch(() => {});
+    if (error instanceof TransportError) throw error;
+    throw new TransportError('upstream', '제공처 응답을 끝까지 읽지 못했어요.');
+  } finally {
+    reader.releaseLock();
+  }
 }
 export function parseLinestring(raw: string): [number, number][] {
   if (!raw) return [];
@@ -396,7 +434,11 @@ async function fetchGyeonggiOpenApiStations(lng: number, lat: number, key: strin
   }
   return [...found.values()].sort((a, b) => (a.distance ?? 999) - (b.distance ?? 999)).slice(0, 20);
 }
-async function resolveStations(region: 'seoul' | 'gyeonggi', lng: number, lat: number, env: Env, fetcher: typeof fetch): Promise<BusStation[]> {
+function resolveStations(region: 'seoul' | 'gyeonggi', lng: number, lat: number, env: Env, fetcher: typeof fetch): Promise<BusStation[]> {
+  return cachedTransport(`stations:${region}:${lng}:${lat}`, 300000, () => fetchStations(region, lng, lat, env, fetcher));
+}
+
+async function fetchStations(region: 'seoul' | 'gyeonggi', lng: number, lat: number, env: Env, fetcher: typeof fetch): Promise<BusStation[]> {
   if (region === 'seoul' && (lng < 126.7 || lng > 127.25 || lat < 37.4 || lat > 37.72)) {
     throw new TransportError('unsupported', '서울 인근 장소를 선택하거나 경기로 바꿔 주세요.');
   }
@@ -434,7 +476,20 @@ async function resolveStations(region: 'seoul' | 'gyeonggi', lng: number, lat: n
   required(env, region === 'seoul' ? 'SEOUL_BUS_SERVICE_KEY' : 'GYEONGGI_BUS_SERVICE_KEY');
   return [];
 }
-const ALLOWED_QUERY_KEYS = ['action', 'direction', 'lat', 'lng', 'mode', 'q', 'region', 'route', 'station', 'stationName', 'toLat', 'toLng'] as const;
+
+function busArrivals(region: 'seoul' | 'gyeonggi', id: string, apiKey: string, fetcher: typeof fetch): Promise<BusResult> {
+  return cachedTransport(`bus:${region}:${id}`, 30000, async () => {
+    const query = region === 'seoul'
+      ? new URLSearchParams({ ServiceKey: apiKey, resultType: 'json', arsId: id })
+      : new URLSearchParams({ serviceKey: apiKey, format: 'json', stationId: id });
+    const endpoint = region === 'seoul' ? 'http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid' : 'https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2';
+    consume(region);
+    const body = await json(`${endpoint}?${query}`, {}, fetcher);
+    return { arrivals: parseArrivals(body, region), fetchedAt: new Date().toISOString(), source: region === 'seoul' ? '서울 TOPIS' : '경기 GBIS' };
+  });
+}
+
+const ALLOWED_QUERY_KEYS = ['action', 'direction', 'lat', 'lng', 'mode', 'q', 'region', 'route', 'station', 'stationName', 'stationPoint', 'toLat', 'toLng'] as const;
 
 function normalizedCacheKey(params: URLSearchParams): string {
   const normalized = new URLSearchParams();
@@ -464,10 +519,10 @@ function isAllowedRequestOrigin(req: IncomingMessage): boolean {
 }
 
 function clientIp(req: IncomingMessage): string {
-  const realIp = headerFirst(req.headers['x-real-ip']);
-  if (realIp) return realIp.slice(0, 100);
-  const forwarded = headerFirst(req.headers['x-forwarded-for']).split(',')[0]?.trim();
-  if (forwarded) return forwarded.slice(0, 100);
+  if (process.env.VERCEL === '1') {
+    const forwarded = headerFirst(req.headers['x-vercel-forwarded-for']).split(',')[0]?.trim();
+    if (forwarded) return forwarded.slice(0, 100);
+  }
   return String(req.socket?.remoteAddress || 'local').slice(0, 100);
 }
 
@@ -491,9 +546,6 @@ export async function transportData(params: URLSearchParams, env: Env = process.
     throw new TransportError('invalid', '지원하지 않는 조회예요.');
   }
   const cacheKey = normalizedCacheKey(params);
-  const hit = cache.get(cacheKey);
-  if (hit && hit.until > Date.now()) return hit.data;
-  if (inflight.has(cacheKey)) return inflight.get(cacheKey);
   const run = async () => {
     if (action === 'walk' || action === 'car') {
       const apiKey = required(env, 'TMAP_APP_KEY');
@@ -576,23 +628,21 @@ export async function transportData(params: URLSearchParams, env: Env = process.
         if (!stations.length) throw new TransportError('upstream', '승차 지점 주변 500m 안에 조회 가능한 정류소가 없어요.');
         const cleanTarget = stationName.replace(/\s+/g, '');
         const matches = cleanTarget ? stations.filter(s => s.name.replace(/\s+/g, '') === cleanTarget) : [];
-        if (matches.length !== 1) throw new TransportError('unsupported', '이 경로의 승차 정류소를 확인하지 못했어요.');
-        const [best] = matches;
+        const ranked = matches.sort((a, b) =>
+          (Number.isFinite(a.distance) ? a.distance! : Infinity) - (Number.isFinite(b.distance) ? b.distance! : Infinity));
+        const [nearest, nextNearest] = ranked;
+        const clearlyCloser = params.get('stationPoint') === 'true'
+          && nearest?.distance !== undefined && nextNearest?.distance !== undefined
+          && nearest.distance <= 25 && nextNearest.distance - nearest.distance >= 20;
+        const best = ranked.length === 1 || clearlyCloser ? nearest : undefined;
+        if (!best) throw new TransportError('unsupported', '이 경로의 승차 정류소를 확인하지 못했어요.');
         stationId = best.id; resolvedName = best.name; resolvedNumber = best.number || best.id;
       }
-      const arrQuery = new URLSearchParams();
-      arrQuery.set(region === 'seoul' ? 'ServiceKey' : 'serviceKey', arrivalApiKey);
-      arrQuery.set(region === 'seoul' ? 'resultType' : 'format', 'json');
-      arrQuery.set(region === 'seoul' ? 'arsId' : 'stationId', stationId);
-      const arrEndpoint = region === 'seoul' ? 'http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid' : 'https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2';
-      consume(region);
-      const arrBody = await json(`${arrEndpoint}?${arrQuery}`, {}, fetcher);
-      const arrivals = parseArrivals(arrBody, region);
+      const { arrivals, fetchedAt, source } = await busArrivals(region, stationId, arrivalApiKey, fetcher);
       const { matched, others } = matchRouteArrivals(arrivals, targetRoute);
       return {
         stationName: resolvedName, stationNumber: resolvedNumber, route: targetRoute,
-        matched, others: others.slice(0, 8), fetchedAt: new Date().toISOString(),
-        source: region === 'seoul' ? '서울 TOPIS' : '경기 GBIS',
+        matched, others: others.slice(0, 8), fetchedAt, source,
       } satisfies TransitLiveResult;
     }
     const region = params.get('region');
@@ -602,25 +652,14 @@ export async function transportData(params: URLSearchParams, env: Env = process.
       return resolveStations(region, lng, lat, env, fetcher);
     }
     const apiKey = required(env, region === 'seoul' ? 'SEOUL_BUS_SERVICE_KEY' : 'GYEONGGI_BUS_SERVICE_KEY');
-    const query = new URLSearchParams();
-    query.set(region === 'seoul' ? 'ServiceKey' : 'serviceKey', apiKey);
-    query.set(region === 'seoul' ? 'resultType' : 'format', 'json');
     const id = params.get('station') || '';
     if (!(region === 'seoul' ? /^\d{5}$/ : /^\d{9}$/).test(id)) throw new TransportError('invalid', region === 'seoul' ? '정류소 번호 5자리를 확인하세요.' : '경기 정류소 ID 9자리를 확인하세요. 표지판 번호와 달라요.');
-    query.set(region === 'seoul' ? 'arsId' : 'stationId', id);
-    const endpoint = region === 'seoul' ? 'http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid' : 'https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2';
-    consume(region);
-    const body = await json(`${endpoint}?${query}`, {}, fetcher);
-    return { arrivals: parseArrivals(body, region), fetchedAt: new Date().toISOString(), source: region === 'seoul' ? '서울 TOPIS' : '경기 GBIS' };
+    return busArrivals(region, id, apiKey, fetcher);
   };
   const ttl = action === 'walk' || action === 'car' || action === 'reverse-geocode' ? 3600000
     : action === 'transit' || action === 'pois' ? 1800000
     : action === 'stations' ? 300000 : 30000;
-  const pending = run().then(data => {
-    if (cache.size > 200) cache.clear();
-    cache.set(cacheKey, { until: Date.now() + ttl, data }); return data;
-  }).finally(() => inflight.delete(cacheKey));
-  inflight.set(cacheKey, pending); return pending;
+  return action === 'arrivals' || action === 'stations' ? run() : cachedTransport(cacheKey, ttl, run);
 }
 export async function handleTransport(req: IncomingMessage, res: ServerResponse, env: Env = { ...DEFAULT_ENV, ...process.env }) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -632,8 +671,14 @@ export async function handleTransport(req: IncomingMessage, res: ServerResponse,
   if ((req.url || '').length > 2048) return fail(400, 'invalid', '요청 주소가 너무 깁니다.');
   const ip = clientIp(req);
   const now = Date.now();
-  if (limits.size > 2000) for (const [k, v] of limits) if (v.reset < now) limits.delete(k);
   const limit = limits.get(ip);
+  if (!limit && limits.size >= 2000) {
+    for (const [k, v] of limits) if (v.reset <= now) limits.delete(k);
+    if (limits.size >= 2000) {
+      res.setHeader('Retry-After', '60');
+      return fail(429, 'quota', '조회가 잦아요. 1분 후 다시 확인하세요.');
+    }
+  }
   if (limit && limit.reset > now && limit.count >= 60) { res.setHeader('Retry-After', '60'); return fail(429, 'quota', '조회가 잦아요. 1분 후 다시 확인하세요.'); }
   limits.set(ip, limit && limit.reset > now ? { ...limit, count: limit.count + 1 } : { reset: now + 60000, count: 1 });
   try {

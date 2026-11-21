@@ -19,7 +19,7 @@ export function useTransitOptions(leg: TransitLegDescriptor | null, enabled: boo
     const controller = new AbortController();
     setQuery(previous => ({ key, loading: true, result: previous?.key === key ? previous.result : undefined }));
     const params = Object.fromEntries(new URLSearchParams(key));
-    void transportRequest<TransitRouteResult>(params, controller.signal, 1800000)
+    void transportRequest<TransitRouteResult>(params, controller.signal)
       .then(result => {
         if (!controller.signal.aborted) setQuery({ key, result, loading: false });
       })

@@ -19,7 +19,7 @@ export default function PlacePicker({ onAdd, onClose }: { onAdd: (s: Stop) => vo
     const controller = new AbortController(); request.current = controller;
     setBusy(true); setError('');
     try {
-      const items = await transportRequest<PoiItem[]>(poiParams(trimmed), controller.signal, 1800000);
+      const items = await transportRequest<PoiItem[]>(poiParams(trimmed), controller.signal);
       if (!controller.signal.aborted) {
         setRemote(items);
         if (!items.length) setError('검색된 장소가 없어요. 다른 키워드로 찾거나 직접 추가해 보세요.');

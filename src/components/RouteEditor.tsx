@@ -52,7 +52,7 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
       setActiveLegId(originLegId);
       setDrawerOpen(true);
       setLocating(false);
-      void transportRequest<{ address: string }>(reverseGeocodeParams(lng, lat), new AbortController().signal, 3600000)
+      void transportRequest<{ address: string }>(reverseGeocodeParams(lng, lat), new AbortController().signal)
         .then(result => setUserLocation(current => result.address && current?.lng === lng && current.lat === lat
           ? { lng, lat, address: result.address } : current)).catch(() => {});
     }, error => {
@@ -92,7 +92,7 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
   useEffect(() => {
     if (!mapVisible || !roadQuery || roadAlreadySaved || roadAlreadyLoaded) return;
     const controller = new AbortController();
-    void transportRequest<WalkingResult>(Object.fromEntries(new URLSearchParams(roadQuery)), controller.signal, 3600000)
+    void transportRequest<WalkingResult>(Object.fromEntries(new URLSearchParams(roadQuery)), controller.signal)
       .then(result => {
         if (!controller.signal.aborted) setRoadCoordinates(previous => ({
           ...Object.fromEntries(Object.entries(previous).slice(-99)), [roadKey]: result.coordinates,
@@ -181,8 +181,13 @@ export default function RouteEditor({ route, onChange, onBack, onShare, onDuplic
               const targetId = picking, currentStop = latestRoute.current.stops.find(s => s.id === targetId);
               patchStop(targetId, { lng, lat });
               if (currentStop && !currentStop.address.trim()) {
-                void transportRequest<{ address: string }>(reverseGeocodeParams(lng, lat), new AbortController().signal, 3600000)
-                  .then(r => { if (r.address) patchStop(targetId, { address: r.address }); }).catch(() => {});
+                void transportRequest<{ address: string }>(reverseGeocodeParams(lng, lat), new AbortController().signal)
+                  .then(r => {
+                    const latest = latestRoute.current.stops.find(stop => stop.id === targetId);
+                    if (r.address && latest?.lng === lng && latest.lat === lat && !latest.address.trim()) {
+                      patchStop(targetId, { address: r.address });
+                    }
+                  }).catch(() => {});
               }
             }
             setPicking(null); setMobileMap(false);

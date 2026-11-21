@@ -173,9 +173,12 @@ export function validRoute(v: unknown): v is Route {
 export function parseLibrary(raw: string): Library {
   if (raw.length > 5_000_000) throw new Error('파일은 5MB 이하여야 해요.');
   const v: unknown = JSON.parse(raw);
-  if (!obj(v) || v.schemaVersion !== 1 || !Array.isArray(v.routes) || v.routes.length > 500 || !v.routes.every(validRoute)
-    || new Set(v.routes.map(r => r.id)).size !== v.routes.length) throw new Error('지원하는 Dayroute 백업 파일이 아니에요.');
-  return v as unknown as Library;
+  if (!validLibrary(v)) throw new Error('지원하는 Dayroute 백업 파일이 아니에요.');
+  return v;
+}
+export function validLibrary(v: unknown): v is Library {
+  return obj(v) && v.schemaVersion === 1 && Array.isArray(v.routes) && v.routes.length <= 500
+    && v.routes.every(validRoute) && new Set(v.routes.map(r => r.id)).size === v.routes.length;
 }
 export function encodeShare(route: Route): string {
   const snapshot = { ...route }; delete snapshot.coverPhoto;
