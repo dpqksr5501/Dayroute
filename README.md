@@ -116,8 +116,6 @@ SEOUL_SUBWAY_SERVICE_KEY=서울열린데이터광장_실시간지하철_인증�
 ```text
 api/
   transport.ts               로컬·Vercel 공용 교통 API, 제공처 응답 정규화·캐시·한도 제어
-server/
-  transitBudget.ts           TMAP 대중교통 일일 한도와 재시도 제어
 src/
   App.tsx                    보관함·공유·백업과 앱 상태
   domain.ts                  코스·도보·대중교통 모델·시간 계산·가져오기 검증

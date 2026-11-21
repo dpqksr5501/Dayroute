@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { hasSharedTransitBudget, reserveTransitRequest } from '../server/transitBudget.ts';
+import { hasSharedTransitBudget, reserveTransitRequest } from '../api/transport.ts';
 
 test('free-plan counter admits ten requests and resets at the Seoul date boundary', async () => {
   const before = Date.parse('2026-11-20T14:59:57Z');
