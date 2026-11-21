@@ -49,8 +49,9 @@ export default function TransitOptions({ result, leg, routeRegion, saved, previe
         </select>
       </label>
     </div>
+    {result.nearby && <p className="candidate-empty" role="status">출발지와 도착지가 가까워 대중교통 후보가 없어요.</p>}
     {!options.length && <p className="candidate-empty" role="status">
-      {result.options.length ? '이 이동수단의 경로가 없어요.' : '이 구간의 경로를 찾지 못했어요.'}
+      {result.options.length ? '이 이동수단의 경로가 없어요.' : result.nearby ? '도보 경로는 아래 길찾기에서 확인할 수 있어요.' : '이 구간의 경로를 찾지 못했어요.'}
     </p>}
     <div className="nv-candidate-list">
       {sortTransitOptions(options, sort).map((option, index) => {

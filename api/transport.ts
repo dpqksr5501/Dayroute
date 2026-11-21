@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { BusArrival, BusResult, BusStation, PoiItem, TransitLiveResult, TransitOption, TransitRouteResult, TransportCode } from '../src/transport.ts';
+import type { BusArrival, BusResult, BusStation, PoiItem, TransitLiveResult, TransitOption, TransitRouteResult, TransportCode, WalkingResult } from '../src/transport.ts';
 import type { Category, TransitLeg, TransitStep, TransitStepMode, WalkingLeg } from '../src/domain.ts';
 
 type Env = Record<string, string | undefined>;
@@ -156,7 +156,7 @@ export function parseLinestring(raw: string): [number, number][] {
   }
   return points;
 }
-export function parseTmap(body: RecordValue, key: string, mapAllowed: boolean) {
+export function parseTmap(body: RecordValue, key: string, mapAllowed: boolean): WalkingResult {
   const features = list(body.features).map(record);
   const props = record(features[0]?.properties);
   const seconds = Number(props.totalTime), meters = Number(props.totalDistance);
@@ -171,6 +171,42 @@ export function parseTmap(body: RecordValue, key: string, mapAllowed: boolean) {
   if (!Number.isFinite(seconds) || !Number.isFinite(meters) || !validWalking(result)) throw new TransportError('upstream', '이 구간의 경로를 찾지 못했어요.');
   return mapAllowed ? result : { ...result, coordinates: [] };
 }
+function tmapRoadRoute(mode: 'walk' | 'car', params: URLSearchParams, env: Env, fetcher: typeof fetch) {
+  const apiKey = required(env, 'TMAP_APP_KEY');
+  if (env.TMAP_FREE_PLAN_CONFIRMED !== 'true') throw new TransportError('unconfigured', '무료 요금제와 호출 차단 설정 확인 후 연결할 수 있어요.');
+  const [lng, lat] = point(params), [toLng, toLat] = point(params, 'to');
+  if (mode === 'walk' && Math.hypot(toLng - lng, toLat - lat) > .4) throw new TransportError('unsupported', '장거리 구간은 대중교통이나 자동차로 계획해 주세요.');
+  const key = `${lng},${lat}>${toLng},${toLat}`;
+  const mapAllowed = env.TMAP_MAP_DISPLAY_CONFIRMED === 'true';
+  return cachedTransport(`road:${mode}:${key}:${mapAllowed}`, 3600000, async () => {
+    consume('tmap');
+    const endpoint = mode === 'walk'
+      ? 'https://apis.openapi.sk.com/tmap/routes/pedestrian?version=1'
+      : 'https://apis.openapi.sk.com/tmap/routes?version=1';
+    const body = await json(endpoint, {
+      method: 'POST', headers: { appKey: apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startX: lng, startY: lat, endX: toLng, endY: toLat, startName: '출발', endName: '도착', reqCoordType: 'WGS84GEO', resCoordType: 'WGS84GEO' }),
+    }, fetcher);
+    return parseTmap(body, key, mapAllowed);
+  });
+}
+
+async function nearbyTransitResult(params: URLSearchParams, env: Env, fetcher: typeof fetch): Promise<TransitRouteResult> {
+  try {
+    const walk = await tmapRoadRoute('walk', params, env, fetcher);
+    const coordinates = walk.coordinates.slice(0, 4000);
+    const option: TransitOption = {
+      id: 'tmap-walk', key: walk.key, provider: 'tmap', summary: '도보 경로', minutes: walk.minutes,
+      transfers: 0, walkMinutes: walk.minutes, fare: 0, fetchedAt: walk.fetchedAt, coordinates,
+      steps: [{ mode: 'walk', minutes: walk.minutes, meters: walk.meters, ...(coordinates.length ? { coordinates } : {}) }],
+    };
+    return { options: [option], fetchedAt: walk.fetchedAt, source: 'TMAP 도보', mapAllowed: walk.mapAllowed, nearby: true };
+  } catch (error) {
+    if (!(error instanceof TransportError)) throw error;
+    return { options: [], fetchedAt: new Date().toISOString(), source: 'TMAP 대중교통', mapAllowed: false, nearby: true };
+  }
+}
+
 function inferCategory(biz: string): Category {
   if (/카페|커피|베이커리|제과|디저트|찻집/.test(biz)) return '카페';
   if (/음식|식당|한식|중식|일식|양식|레스토랑|치킨|피자|분식|술집|주점|고기/.test(biz)) return '식사';
@@ -546,22 +582,8 @@ export async function transportData(params: URLSearchParams, env: Env = process.
     throw new TransportError('invalid', '지원하지 않는 조회예요.');
   }
   const cacheKey = normalizedCacheKey(params);
+  if (action === 'walk' || action === 'car') return tmapRoadRoute(action, params, env, fetcher);
   const run = async () => {
-    if (action === 'walk' || action === 'car') {
-      const apiKey = required(env, 'TMAP_APP_KEY');
-      if (env.TMAP_FREE_PLAN_CONFIRMED !== 'true') throw new TransportError('unconfigured', '무료 요금제와 호출 차단 설정 확인 후 연결할 수 있어요.');
-      const [lng, lat] = point(params), [toLng, toLat] = point(params, 'to');
-      if (action === 'walk' && Math.hypot(toLng - lng, toLat - lat) > .4) throw new TransportError('unsupported', '장거리 구간은 대중교통이나 자동차로 계획해 주세요.');
-      consume('tmap');
-      const endpoint = action === 'walk'
-        ? 'https://apis.openapi.sk.com/tmap/routes/pedestrian?version=1'
-        : 'https://apis.openapi.sk.com/tmap/routes?version=1';
-      const body = await json(endpoint, {
-        method: 'POST', headers: { appKey: apiKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ startX: lng, startY: lat, endX: toLng, endY: toLat, startName: '출발', endName: '도착', reqCoordType: 'WGS84GEO', resCoordType: 'WGS84GEO' }),
-      }, fetcher);
-      return parseTmap(body, `${lng},${lat}>${toLng},${toLat}`, env.TMAP_MAP_DISPLAY_CONFIRMED === 'true');
-    }
     if (action === 'pois') {
       const apiKey = required(env, 'TMAP_APP_KEY');
       if (env.TMAP_FREE_PLAN_CONFIRMED !== 'true') throw new TransportError('unconfigured', 'TMAP 연결 확인 후 실시간 장소 검색을 사용할 수 있어요.');
@@ -597,6 +619,8 @@ export async function transportData(params: URLSearchParams, env: Env = process.
           method: 'POST', headers: { appKey: apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
           body: JSON.stringify({ startX: String(lng), startY: String(lat), endX: String(toLng), endY: String(toLat), count: 5, lang: 0, format: 'json' }),
         }, fetcher);
+        // A successful TMAP response with status 11 indicates nearby endpoints.
+        if (Number(record(body.result).status) === 11) return nearbyTransitResult(params, env, fetcher);
         return parseTmapTransit(body, key, transitMapAllowed);
       }
       throw new TransportError('unconfigured', '대중교통 경로 API 요금제 확인 후 연결할 수 있어요.');
@@ -656,7 +680,7 @@ export async function transportData(params: URLSearchParams, env: Env = process.
     if (!(region === 'seoul' ? /^\d{5}$/ : /^\d{9}$/).test(id)) throw new TransportError('invalid', region === 'seoul' ? '정류소 번호 5자리를 확인하세요.' : '경기 정류소 ID 9자리를 확인하세요. 표지판 번호와 달라요.');
     return busArrivals(region, id, apiKey, fetcher);
   };
-  const ttl = action === 'walk' || action === 'car' || action === 'reverse-geocode' ? 3600000
+  const ttl = action === 'reverse-geocode' ? 3600000
     : action === 'transit' || action === 'pois' ? 1800000
     : action === 'stations' ? 300000 : 30000;
   return action === 'arrivals' || action === 'stations' ? run() : cachedTransport(cacheKey, ttl, run);

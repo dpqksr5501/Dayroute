@@ -10,7 +10,7 @@ export interface BusArrival { route: string; direction: string; first: string; s
 export interface BusResult { arrivals: BusArrival[]; fetchedAt: string; providerTime?: string; source: string }
 export interface PoiItem { id: string; name: string; address: string; category: Category; lng: number; lat: number }
 export interface TransitOption extends TransitLeg { id: string }
-export interface TransitRouteResult { options: TransitOption[]; fetchedAt: string; source: string; mapAllowed: boolean }
+export interface TransitRouteResult { options: TransitOption[]; fetchedAt: string; source: string; mapAllowed: boolean; nearby?: true }
 export interface TransitLiveResult {
   stationName: string; stationNumber?: string; route: string;
   matched: BusArrival[]; others: BusArrival[]; fetchedAt: string; source: string;

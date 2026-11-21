@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { carFor, decodeShare, encodeShare, legMinutes, makeRoute, makeStop, routeText, transitFor, walkingKey } from '../src/domain.ts';
-import { firstTransitStep, normalizeRouteName, transportRequest, type TransitOption } from '../src/transport.ts';
+import { firstTransitStep, normalizeRouteName, transportRequest, type TransitOption, type TransitRouteResult, type WalkingResult } from '../src/transport.ts';
 import { originLegId, sortTransitOptions, transitArrivalTime, transitCategory, transitDepartureTime, transitLegs } from '../src/transitCandidates.ts';
 import handler, { handleTransport, matchRouteArrivals, parseOdsayTransit, parseSubwayArrivals, parseTmapPois, parseTmapReverseGeocode, parseTmapTransit, transportData, TransportError } from '../api/transport.ts';
 
@@ -81,6 +81,48 @@ test('parseOdsayTransit normalizes ODSay subPaths and station metadata', () => {
   const first = firstTransitStep(parsed.options[0]);
   assert.equal(first?.stationId, '04215');
   assert.equal(first?.from, '성수동구두테마공원');
+});
+
+test('nearby TMAP transit legs reuse the pedestrian result and keep the walking category', async () => {
+  const endpoints = { lng: '127.0151', lat: '37.2819', toLng: '127.0144', toLat: '37.2835' };
+  const calls: string[] = [];
+  const fetcher: typeof fetch = async input => {
+    const url = new URL(String(input));
+    calls.push(url.pathname);
+    if (url.pathname === '/transit/routes') return Response.json({ result: { status: 11, message: '출발지와 도착지가 너무 가까움' } });
+    assert.equal(url.pathname, '/tmap/routes/pedestrian');
+    return Response.json({
+      features: [
+        { geometry: { type: 'Point' }, properties: { totalTime: 233, totalDistance: 252 } },
+        { geometry: { type: 'LineString', coordinates: [[127.0151, 37.2819], [127.0144, 37.2835]] } },
+      ],
+    });
+  };
+  const env = { TMAP_APP_KEY: 'test-key', TMAP_FREE_PLAN_CONFIRMED: 'true' };
+  const [result, walk] = await Promise.all([
+    transportData(new URLSearchParams({ action: 'transit', ...endpoints }), env, fetcher),
+    transportData(new URLSearchParams({ action: 'walk', ...endpoints }), env, fetcher),
+  ]) as [TransitRouteResult, WalkingResult];
+  assert.equal(result.nearby, true);
+  assert.equal(result.source, 'TMAP 도보');
+  assert.equal(result.options.length, 1);
+  assert.equal(transitCategory(result.options[0]), 'walk');
+  assert.equal(result.options[0].minutes, 4);
+  assert.equal(result.options[0].steps[0].meters, 252);
+  assert.equal(result.fetchedAt, walk.fetchedAt);
+  assert.equal(result.mapAllowed, false);
+  assert.deepEqual(result.options[0].coordinates, []);
+  assert.deepEqual(calls.sort(), ['/tmap/routes/pedestrian', '/transit/routes']);
+});
+
+test('nearby TMAP transit legs leave the candidate list empty without a pedestrian entitlement', async () => {
+  const params = new URLSearchParams({ action: 'transit', lng: '127.016', lat: '37.2819', toLng: '127.0144', toLat: '37.2835' });
+  const result = await transportData(params, { TMAP_APP_KEY: 'test-key', TMAP_TRANSIT_CONFIRMED: 'true' }, async input => {
+    assert.equal(new URL(String(input)).pathname, '/transit/routes');
+    return Response.json({ result: { status: 11 } });
+  }) as TransitRouteResult;
+  assert.equal(result.nearby, true);
+  assert.deepEqual(result.options, []);
 });
 
 test('transit-live stitches boarding station lookup with live arrival matching', async () => {

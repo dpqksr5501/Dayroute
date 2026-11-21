@@ -56,7 +56,10 @@ export default function TransitCandidateCard({ option, from, routeRegion, arriva
           <TransitArrivals step={step} from={from} routeRegion={routeRegion} />
         </div>
       </li>)}
-    </ol> : <p className="nv-walk-only-desc">출발지에서 목적지까지 도보로 이동</p>}
+    </ol> : <p className="nv-walk-only-desc">
+      출발지에서 목적지까지 도보로 이동
+      {option.steps.length === 1 && option.steps[0].meters !== undefined ? ` · ${option.steps[0].meters.toLocaleString('ko-KR')}m` : ''}
+    </p>}
     <div className="nv-card-foot">
       <span className="nv-foot-meta">도보 {option.walkMinutes}분 · {option.transfers ? `환승 ${option.transfers}회` : '환승 없음'}</span>
       <button type="button" className="nv-detail-toggle" aria-expanded={expanded} aria-controls={detailId} onClick={() => setExpanded(!expanded)}>
