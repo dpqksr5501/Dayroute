@@ -22,7 +22,7 @@
 1. MapLibre's stylesheet changed the map container to `position: relative`, leaving its height at zero. DOM measurements confirmed the container was 0px high while the map shell was over 500px. A specific map-container selector now fixes the absolute positioning and full height. Verified tile/pin visibility and mobile switching.
 2. Initial offline reload returned the app HTML but did not boot the JS. Static-file cache matches were sensitive to request `Vary` differences. The worker now matches only its own allowlisted same-origin static assets in its versioned cache with `ignoreVary: true`. After installing this build, two repeated origin-unavailable reload/open flows passed. This is a cache-matching implementation fix, not storage cleanup. All old app caches are removed only during normal activation of a newer worker.
 
-## Remaining checks before public launch
+## 당시 남겨 둔 검증 항목 (2026-10-31)
 
 - Physical iPhone/Android installation, storage-pressure eviction, private-browsing restrictions, full airplane-mode restart, low-end GPU and prolonged mobile battery behavior.
 - Live API integrations: nationwide business search, actual road routes, opening hours, weather, photorealistic 3D. None are enabled or claimed to be current.
@@ -48,4 +48,13 @@
 - Enhanced 3D map quality in `MapView.tsx` with directional lighting (`setLight`), height-interpolated vertical-gradient building extrusions, cased road/transit polylines, transit boarding node markers, and an explicit 2D/3D camera toggle.
 - Verified with 20 passing unit tests (`tests/*.test.ts`), strict TypeScript check (`tsc -b`), and Vite production bundle build.
 
-No paid API keys, account sign-ups, system-wide tool installations, unrelated process termination, or engine builds were performed.
+## 앱 내 경로 흐름과 확인 범위 (2026-11-21)
+
+| 항목 | 확인한 내용 | 추가 확인 |
+| --- | --- | --- |
+| 후보 비교와 일정 적용 | 코드에서 구간 선택, 후보 조회·필터·정렬, 지도 미리보기와 명시적 일정 반영 흐름을 확인했습니다. 로컬 기준 `43a408d`에서 자동 테스트 38개가 통과했습니다. | 운영 행궁동 예시 코스에서는 후보 화면과 호출 한도 안내까지 관찰했습니다. 신규 후보 수신부터 적용·재로드까지의 전체 확인은 남았습니다. |
+| 실시간 도착정보 | 앞선 운영 점검에서 서울 성동13 버스와 성수역 2호선 응답을 각각 확인했습니다. | 두 예시 외 구간과 제공처 장애 시 동작은 별도로 확인합니다. 같은 지하철 노선의 양방향 응답을 포함한 모의 사례에서 원하는 방면을 특정할 근거가 부족한 경우를 검토했습니다. 방향 매칭 변경은 적용 전입니다. |
+| 저장·가져오기 크기 | 한도 근처의 동일 데이터를 간결한 JSON으로 계산하면 4,933,222바이트, 들여쓴 백업 파일은 5,062,638바이트였습니다. 가져오기 화면의 파일 크기 제한은 5,000,000바이트입니다. | 한도 근처의 전체 백업은 내보내기에서 가져오기까지 왕복 검사가 필요합니다. 이 차이를 해결하는 코드 변경은 적용 전입니다. |
+| 외부 지도 | 네이버는 장소명, 카카오는 장소명과 좌표를 받는 링크 생성 코드를 확인했습니다. | 외부 페이지의 위치 해석과 앱 전환은 기기에서 별도로 확인합니다. |
+
+검사 범위는 자동 테스트, 운영 설정 상태, 실제 사용자 흐름으로 나눕니다. `pnpm verify:deployment`는 HTML·번들·헤더·교통 함수의 상태를 확인합니다. `--arrivals` 모드는 일부 도착정보를 추가로 확인합니다. [휴대폰 테스트 가이드](PHONE_TESTING.md)의 시나리오로 신규 후보 수신, 앱 내 후보 미리보기와 일정 반영을 이어서 점검할 수 있습니다.
